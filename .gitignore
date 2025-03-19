@@ -1,7 +1,6 @@
 *.pdf
 *.*~
 *.ps
-latex.out/
 xv6-riscv-src
 *.aux
 *.idx
@@ -11,4 +10,4 @@ xv6-riscv-src
 *.toc
 *.bbl
 *.blg
-*.out
+book.out
