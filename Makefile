@@ -14,13 +14,14 @@ $(T)/%.tex: %.tex | src
 
 src:
 	if [ ! -d $(SRC) ]; then \
-		git clone git@github.com:mit-pdos/xv6-riscv.git $(SRC) ; \
+		git clone git@github.com:alanveloso/xv6-riscv-book-ptbr.git $(SRC) ; \
 	else \
 		git -C $(SRC) pull ; \
 	fi; \
 	true
 
-book.pdf: src book.tex $(TEX)
+book.pdf: 
+	src book.tex $(TEX)
 	pdflatex book.tex
 	bibtex book
 	pdflatex book.tex
@@ -29,7 +30,7 @@ book.pdf: src book.tex $(TEX)
 clean:
 	rm -f book.aux book.idx book.ilg book.ind book.log\
 	 	book.toc book.bbl book.blg book.out
-	rm -rf latex.out
+	# rm -rf latex.out
 	rm -rf $(SRC)
 
 spell:
