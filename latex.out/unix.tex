@@ -1,267 +1,250 @@
-\chapter{Operating system interfaces}
+\chapter{Interfaces de sistemas operacionais}
 \label{CH:UNIX}
 
-The job of an operating system is to share a computer among
-multiple programs and to provide a more useful set of services
-than the hardware alone supports.
-An operating system manages and abstracts
-the low-level hardware, so that, for example,
-a word processor need not concern itself with which type
-of disk hardware is being used.
-An operating system shares the hardware among multiple programs so
-that they run (or appear to run) at the same time.
-Finally, operating systems provide controlled ways for programs
-to interact, so that they can share data or work together.
+A função de um sistema operacional é compartilhar um computador entre
+múltiplos programas e fornecer um conjunto de serviços mais úteis
+do que o suporte oferecido apenas pelo hardware.
+Um sistema operacional gerencia e abstrai
+o hardware de baixo nível, de modo que, por exemplo,
+um processador de texto não precise se preocupar com qual tipo
+de disco está sendo utilizado.
+Um sistema operacional compartilha o hardware entre vários programas para que
+eles executem (ou aparentem executar) ao mesmo tempo.
+Por fim, sistemas operacionais fornecem maneiras controladas para que os programas
+interajam, de modo que possam compartilhar dados ou trabalhar em conjunto.
 
-An operating system provides services to user programs through an interface.
-\index{interface design}
-Designing a good interface turns out to be
-difficult.  On the one hand, we would like the interface to be
-simple and narrow because that makes it easier to get the
-implementation right.  On the other hand,
-we may be tempted to offer many sophisticated features to applications.
-The trick in
-resolving this tension is to design interfaces that rely on a few
-mechanisms that can be combined to provide much generality.
+Um sistema operacional fornece serviços aos programas de usuário por meio de uma interface.
+\index{projeto de interface}
+Projetar uma boa interface acaba sendo
+uma tarefa difícil. Por um lado, gostaríamos que a interface fosse
+simples e enxuta, pois isso facilita a implementação correta.
+Por outro lado,
+podemos ser tentados a oferecer muitos recursos sofisticados às aplicações.
+O truque para resolver essa tensão é projetar interfaces que se baseiem em poucos
+mecanismos que possam ser combinados para oferecer grande generalidade.
 
-This book uses a single operating system as a concrete example to
-illustrate operating system concepts.  That operating system,
-xv6, provides the basic interfaces introduced by Ken Thompson and
-Dennis Ritchie's Unix operating system~\cite{unix}, as well as mimicking Unix's
-internal design.  Unix provides a
-narrow interface whose mechanisms combine well, offering a surprising
-degree of generality.  This interface has been so successful that
-modern operating systems—BSD, Linux, macOS, Solaris, and even, to a
-lesser extent, Microsoft Windows—have Unix-like interfaces.
-Understanding xv6 is a good start toward understanding any of these
-systems and many others.
+Este livro utiliza um único sistema operacional como exemplo concreto para
+ilustrar conceitos de sistemas operacionais. Esse sistema operacional,
+o xv6, fornece as interfaces básicas introduzidas por Ken Thompson e
+Dennis Ritchie no sistema Unix~\cite{unix}, além de imitar o projeto interno do Unix.
+O Unix fornece uma
+interface enxuta cujos mecanismos se combinam bem, oferecendo um surpreendente
+grau de generalidade. Essa interface foi tão bem-sucedida que
+sistemas operacionais modernos—BSD, Linux, macOS, Solaris e até, em menor grau,
+o Microsoft Windows—possuem interfaces semelhantes ao Unix.
+Compreender o xv6 é um bom começo para entender qualquer um desses
+sistemas e muitos outros.
 
-As 
-Figure~\ref{fig:os} shows,
-xv6 takes the traditional form of a
-\indextext{kernel},
-a special program that provides
-services to running programs.
-Each running program, called a
-\indextext{process},
-has memory containing instructions, data, and a stack. The
-instructions implement the
-program's computation.  The data are the variables on which
-the computation acts. The stack organizes the program's procedure calls.
-A given computer typically has many processes but only a single
+Como mostra a 
+Figura~\ref{fig:os},
+o xv6 assume a forma tradicional de um
+\indextext{kernel} (núcleo),
+um programa especial que fornece
+serviços aos programas em execução.
+Cada programa em execução, chamado de
+\indextext{processo},
+possui memória contendo instruções, dados e uma pilha. As
+instruções implementam o
+cálculo do programa. Os dados são as variáveis sobre as quais
+o cálculo atua. A pilha organiza as chamadas de procedimentos do programa.
+Um computador geralmente possui muitos processos, mas apenas um único
 kernel.
 
-When a
-process needs to invoke a kernel service, it invokes 
-a \indextext{system call},
-one of the calls
-in the operating system's interface.
-The system call enters the kernel;
-the kernel performs the service and returns.
-Thus a process alternates between executing in
-\indextext{user space}
-and
-\indextext{kernel space}.
+Quando um
+processo precisa invocar um serviço do kernel, ele chama
+uma \indextext{chamada de sistema} (system call),
+uma das chamadas
+da interface do sistema operacional.
+A chamada de sistema entra no kernel;
+o kernel realiza o serviço e retorna.
+Assim, um processo alterna entre a execução no
+\indextext{espaço do usuário}
+e no
+\indextext{espaço do kernel}.
 
-As described in detail in subsequent chapters, the kernel uses the hardware protection mechanisms provided by a
+Como será descrito em detalhes nos capítulos seguintes, o kernel utiliza os mecanismos de proteção de hardware fornecidos por uma
 CPU\footnote{
-This text generally refers to the hardware element that executes a
-computation with the term \indextext{CPU}, an acronym for central
-processing unit.  Other documentation (e.g., the RISC-V specification)
-also uses the words processor, core, and hart instead of CPU.
+Este texto geralmente se refere ao elemento de hardware que executa uma
+computação com o termo \indextext{CPU}, sigla para unidade central
+de processamento (central processing unit). Outras documentações (por exemplo, a especificação RISC-V)
+também utilizam os termos processador, núcleo (core) e hart em vez de CPU.
 }
-to
-ensure that each process executing in user space can access only
-its own memory.
-The kernel executes with the hardware privileges required to
-implement these protections; user programs execute without
-those privileges.
-When a user program invokes a system call, the hardware
-raises the privilege level and starts executing a pre-arranged
-function in the kernel.
+para
+garantir que cada processo executando no espaço do usuário possa acessar apenas
+sua própria memória.
+O kernel executa com os privilégios de hardware necessários para
+implementar essas proteções; os programas de usuário executam sem
+esses privilégios.
+Quando um programa de usuário invoca uma chamada de sistema, o hardware
+eleva o nível de privilégio e começa a executar uma função pré-configurada
+no kernel.
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/os.pdf}
-\caption{A kernel and two user processes.}
+\caption{Um kernel e dois processos de usuário.}
 \label{fig:os}
 \end{figure}
 
-The collection of system calls that a kernel provides
-is the interface that user programs see.
-The xv6 kernel provides a subset of the services and system calls
-that Unix kernels traditionally offer.  
-Figure~\ref{fig:api} 
-lists all of xv6's system calls.
+O conjunto de chamadas de sistema que um kernel fornece
+é a interface que os programas de usuário enxergam.
+O kernel do xv6 fornece um subconjunto dos serviços e chamadas de sistema
+que os kernels Unix tradicionalmente oferecem.  
+A Figura~\ref{fig:api} 
+lista todas as chamadas de sistema do xv6.
 
-The rest of this chapter outlines xv6's services---processes, memory,
-file descriptors, pipes, and a file system---and illustrates them with
-code snippets and discussions of how the \indextext{shell}, 
-Unix's command-line user interface, uses
-them. The shell's use of system calls illustrates how carefully they
-have been designed.
+O restante deste capítulo descreve os serviços do xv6—processos, memória,
+descritores de arquivos, pipes e sistema de arquivos—e os ilustra com
+trechos de código e discussões sobre como o \indextext{shell},
+a interface de linha de comando do Unix, os utiliza.
+O uso das chamadas de sistema pelo shell ilustra o quanto essas interfaces
+foram cuidadosamente projetadas.
 
-The shell is an ordinary program that reads commands from the user
-and executes them.
-The fact that the shell is a user program, and not part of the kernel,
-illustrates the power of the system call interface: there is nothing
-special about the shell.
-It also means that the shell is easy to replace; as a result,
-modern Unix systems have a variety of
-shells to choose from, each with its own user interface
-and scripting features.
-The xv6 shell is a simple implementation of the essence of
-the Unix Bourne shell.  Its implementation can be found at 
+O shell é um programa comum que lê comandos do usuário
+e os executa.
+O fato de o shell ser um programa de usuário, e não parte do kernel,
+ilustra o poder da interface de chamadas de sistema: não há nada de
+especial sobre o shell.
+Isso também significa que o shell pode ser facilmente substituído; como resultado,
+sistemas Unix modernos possuem uma variedade de
+shells disponíveis, cada um com sua própria interface
+e recursos de script.
+O shell do xv6 é uma implementação simples da essência do
+shell Bourne do Unix. Sua implementação pode ser encontrada em 
 \lineref{user/sh.c}{1}.
+
 %% 
 %% 	Processes and memory
 %% 
-\section{Processes and memory}
+\section{Processos e memória}
 
-An xv6 process consists of user-space memory (instructions, data, and stack)
-and per-process state private to the kernel.
-Xv6 
-\indextext{time-share}s
-processes: it transparently switches the available CPUs
-among the set of processes waiting to execute.
-When a process is not executing, xv6 saves the process's CPU registers,
-restoring them when it next runs the process.
-The kernel associates a process identifier, or
+Um processo no xv6 consiste em memória no espaço do usuário (instruções, dados e pilha)
+e estado por processo, privado do kernel.
+O xv6
+\indextext{compartilha o tempo} (time-share)
+entre processos: ele alterna transparentemente as CPUs disponíveis
+entre o conjunto de processos que aguardam execução.
+Quando um processo não está em execução, o xv6 salva os registradores da CPU do processo,
+restaurando-os quando for executá-lo novamente.
+O kernel associa um identificador de processo, ou
 \indexcode{PID},
-with each process.
+a cada processo.
 
 \begin{figure}[t]
 \center
 \begin{tabular}{ll}
-{\bf System call} & {\bf Description} \\
-\midrule
-int fork() & Create a process, return child's PID. \\
-int exit(int status) & Terminate the current process; status reported to wait(). No return. \\
-int wait(int *status) & Wait for a child to exit; exit status in *status; returns child PID. \\
-int kill(int pid) & Terminate process PID. Returns 0, or -1 for error. \\
-int getpid() & Return the current process's PID. \\
-int sleep(int n) & Pause for n clock ticks. \\
-int exec(char *file, char *argv[]) & Load a file and execute it with arguments; only returns if error. \\
-char *sbrk(int n) & Grow process's memory by n zero bytes. Returns start of new memory. \\
-int open(char *file, int flags) & Open a file; flags indicate read/write; returns an fd (file descriptor). \\
-int write(int fd, char *buf, int n) & Write n bytes from buf to file descriptor fd; returns n. \\
-int read(int fd, char *buf, int n) & Read n bytes into buf; returns number read; or 0 if end of file. \\
-int close(int fd) & Release open file fd. \\
-int dup(int fd) & Return a new file descriptor referring to the same file as fd.\\
-int pipe(int p[]) & Create a pipe, put read/write file descriptors in p[0] and p[1]. \\
-int chdir(char *dir) & Change the current directory. \\
-int mkdir(char *dir) & Create a new directory. \\
-int mknod(char *file, int, int) & Create a device file. \\
-int fstat(int fd, struct stat *st) & Place info about an open file into *st. \\
-int link(char *file1, char *file2) & Create another name (file2) for the file file1. \\
-int unlink(char *file) & Remove a file. \\
+\textbf{Chamada de sistema}            & \textbf{Descrição}                                                                                                                           \\ \hline
+int fork()                             & Cria um processo, retorna o PID do filho.                                                                                                    \\
+int exit(int status)                   & Termina o processo atual; status retornado para wait(). Sem retorno.                                                                         \\
+int wait(int *status)                  & \begin{tabular}[c]{@{}l@{}}Aguarda a finalização de um processo filho; status é colocado \\ em *status; retorna o PID do filho.\end{tabular} \\
+int kill(int pid)                      & Encerra o processo PID. Retorna 0, ou -1 em caso de erro.                                                                                    \\
+int getpid()                           & Retorna o PID do processo atual.                                                                                                             \\
+int sleep(int n)                       & Pausa por n ciclos de clock.                                                                                                                 \\
+int exec(char *file, char *argv{[}{]}) & \begin{tabular}[c]{@{}l@{}}Carrega um arquivo e executa com argumentos; só retorna em caso \\ de erro.\end{tabular}                          \\
+char *sbrk(int n)                      & \begin{tabular}[c]{@{}l@{}}Expande a memória do processo em n bytes zero. Retorna o início da \\ nova memória.\end{tabular}                  \\
+int open(char *file, int flags)        & \begin{tabular}[c]{@{}l@{}}Abre um arquivo; flags indicam leitura/escrita; retorna um fd \\ (descritor de arquivo).\end{tabular}             \\
+int write(int fd, char *buf, int n)    & Escreve n bytes de buf no descritor fd; retorna n.                                                                                           \\
+int read(int fd, char *buf, int n)     & Lê n bytes em buf; retorna quantidade lida, ou 0 se fim de arquivo.                                                                          \\
+int close(int fd)                      & Libera o arquivo aberto fd.                                                                                                                  \\
+int dup(int fd)                        & Retorna um novo descritor que referencia o mesmo arquivo que fd.                                                                             \\
+int pipe(int p{[}{]})                  & Cria um pipe, insere descritores de leitura/escrita em p{[}0{]} e p{[}1{]}.                                                                  \\
+int chdir(char *dir)                   & Altera o diretório atual.                                                                                                                    \\
+int mkdir(char *dir)                   & Cria um novo diretório.                                                                                                                      \\
+int mknod(char *file, int, int)        & Cria um arquivo de dispositivo.                                                                                                              \\
+int fstat(int fd, struct stat *st)     & Insere informações de um arquivo aberto em *st.                                                                                              \\
+int link(char *file1, char *file2)     & Cria outro nome (file2) para o arquivo file1.                                                                                                \\
+int unlink(char *file)                 & Remove um arquivo.                                                                                                                          
 \end{tabular}
-\caption{Xv6 system calls. If not otherwise stated, these calls return
-0 for no error, and -1 if there's an error.}
+\caption{Chamadas de sistema do xv6. Salvo indicação contrária, essas chamadas retornam 0 se não houver erro, e -1 em caso de erro.}
 \label{fig:api}
 \end{figure}
 
-A process may create a new process using the
-\indexcode{fork}
-system call.
+Um processo pode criar um novo processo usando a chamada de sistema
+\indexcode{fork}.
 \lstinline{fork}
-gives the new process an exact copy of the calling
-process's memory: it copies the instructions, data, and
-stack of the calling process into the new process's memory.
+cria no novo processo uma cópia exata da memória do processo que fez a chamada: ele copia as instruções, dados e
+a pilha do processo original para o novo processo.
 \lstinline{fork}
-returns in both the original and new processes.
-In the original process, \lstinline{fork} returns the new process's
-PID.
-In the new process, \lstinline{fork} returns zero.
-The original and new processes are often called the
-\indextext{parent}
-and
-\indextext{child}.
+retorna em ambos os processos: o original e o novo.
+No processo original, \lstinline{fork} retorna o PID do novo processo.
+No processo novo, \lstinline{fork} retorna zero.
+Os processos original e novo são frequentemente chamados de
+\indextext{pai}
+e
+\indextext{filho}.
 
-For example, consider the following program fragment written in the C
-programming language~\cite{kernighan}:
+Por exemplo, considere o seguinte trecho de programa escrito na linguagem C~\cite{kernighan}:
 \begin{lstlisting}[]
 int pid = fork();
 if(pid > 0){
-  printf("parent: child=%d\n", pid);
+  printf("pai: filho=%d\n", pid);
   pid = wait((int *) 0);
-  printf("child %d is done\n", pid);
+  printf("filho %d terminou\n", pid);
 } else if(pid == 0){
-  printf("child: exiting\n");
+  printf("filho: saindo\n");
   exit(0);
 } else {
-  printf("fork error\n");
+  printf("erro no fork\n");
 }
 \end{lstlisting}
-The
+A chamada de sistema
 \indexcode{exit}
-system call causes the calling process to stop executing and
-to release resources such as memory and open files.
-Exit takes an integer status argument,
-conventionally 0 to indicate success and 1 to indicate failure.
-The
+faz com que o processo que a chamou pare de executar e
+libere recursos como memória e arquivos abertos.
+Exit recebe um argumento inteiro de status,
+convencionalmente 0 para indicar sucesso e 1 para indicar falha.
+A chamada
 \indexcode{wait}
-system call returns the PID of an exited (or killed) child of the
-current process and copies the exit status of the child to the address
-passed to wait; if none of the caller's children
-has exited,
+retorna o PID de um filho finalizado (ou morto) do processo atual
+e copia o status de saída do filho para o endereço passado para wait;
+se nenhum dos filhos do chamador tiver finalizado,
 \indexcode{wait}
-waits for one to do so.
-If the caller has no children, \lstinline{wait} immediately
-returns -1.
-If the parent doesn't care about the exit status of a child, it can
-pass a 0 address to
+aguarda que um finalize.
+Se o processo pai não tiver filhos, \lstinline{wait} retorna imediatamente -1.
+Se o pai não se importa com o status de saída do filho, pode
+passar o endereço nulo (0) para
 \lstinline{wait}.
 
-In the example, the output lines
+No exemplo, as linhas de saída
 \begin{lstlisting}[]
-parent: child=1234
-child: exiting
+pai: filho=1234
+filho: saindo
 \end{lstlisting}
-might come out in either order (or even intermixed), depending on whether the
-parent or child gets to its
-\indexcode{printf}
-call first.
-After the child exits, the parent's
-\indexcode{wait}
-returns, causing the parent to print
+podem aparecer em qualquer ordem (ou até intercaladas), dependendo de quem
+executar o \indexcode{printf} primeiro: o pai ou o filho.
+Após o filho finalizar, o \indexcode{wait} do pai retorna, fazendo com que o pai imprima:
 \begin{lstlisting}[]
-parent: child 1234 is done
+pai: filho 1234 terminou
 \end{lstlisting}
-Although the child has the same memory contents as the parent initially, the
-parent and child are executing with separate memory and separate registers:
-changing a variable in one does not affect the other. For example, when the
-return value of
+Embora o filho comece com o mesmo conteúdo de memória do pai,
+pai e filho executam com memórias e registradores separados:
+alterar uma variável em um não afeta o outro. Por exemplo, quando o valor de retorno de
 \lstinline{wait}
-is stored into
-\lstinline{pid} 
-in the parent process,
-it doesn't change the variable 
+é armazenado em
 \lstinline{pid}
-in the child.  The value of
+no processo pai,
+isso não altera a variável
 \lstinline{pid}
-in the child will still be zero.
+no filho. O valor de
+\lstinline{pid}
+no filho continuará sendo zero.
 
-The
+A chamada de sistema
 \indexcode{exec}
-system call
-replaces the calling process's memory with a new memory
-image loaded from a file stored in the file system.
-The file must have a particular format, which specifies which part of
-the file holds instructions, which part is data, at which instruction
-to start, etc. Xv6
-uses the ELF format, which Chapter~\ref{CH:MEM} discusses in
-more detail.
-Usually the file is the result of compiling a program's source code.
-When
+substitui a memória do processo chamador por uma nova imagem
+de memória carregada de um arquivo no sistema de arquivos.
+O arquivo deve ter um formato específico, que indica quais partes contêm instruções,
+dados, onde iniciar a execução, etc.
+O xv6 usa o formato ELF, que será discutido com mais detalhes no Capítulo~\ref{CH:MEM}.
+Normalmente, o arquivo é o resultado da compilação de um código-fonte.
+Quando
 \indexcode{exec}
-succeeds, it does not return to the calling program;
-instead, the instructions loaded from the file start
-executing at the entry point declared in the ELF header.
+é bem-sucedido, ele não retorna ao programa chamador;
+em vez disso, as instruções carregadas começam a ser executadas a partir do ponto de entrada
+indicado no cabeçalho ELF.
 \lstinline{exec}
-takes two arguments: the name of the file containing the
-executable and an array of string arguments.
-For example:
+recebe dois argumentos: o nome do arquivo executável e um vetor de argumentos em formato string.
+Por exemplo:
 \begin{lstlisting}[]
 char *argv[3];
 
@@ -269,174 +252,166 @@ argv[0] = "echo";
 argv[1] = "hello";
 argv[2] = 0;
 exec("/bin/echo", argv);
-printf("exec error\n");
+printf("erro no exec\n");
 \end{lstlisting}
-This fragment replaces the calling program with an instance
-of the program 
+Esse trecho substitui o programa chamador por uma instância
+do programa 
 \lstinline{/bin/echo}
-running with the argument list
-\lstinline{echo}
-\lstinline{hello}.
-Most programs ignore the first element of the argument array, which is 
-conventionally the name of the program.
+executando com a lista de argumentos
+\lstinline{echo hello}.
+A maioria dos programas ignora o primeiro elemento do vetor de argumentos, que
+convencionalmente é o nome do programa.
 
-The xv6 shell uses the above calls to run programs on behalf of
-users. The main structure of the shell is simple; see
-\lstinline{main} 
-The main loop reads a line of input from the user with
+O shell do xv6 usa essas chamadas para executar programas em nome dos
+usuários. A estrutura principal do shell é simples; veja
+\lstinline{main}.
+O loop principal lê uma linha de entrada do usuário com
 \indexcode{getcmd}.
-Then it calls 
-\lstinline{fork}, 
-which creates a copy of the shell process. The
-parent calls
+Depois, chama
+\lstinline{fork},
+que cria uma cópia do processo do shell.
+O processo pai chama
 \lstinline{wait},
-while the child runs the command.  For example, if the user
-had typed
+enquanto o filho executa o comando. Por exemplo, se o usuário digitar
 ``\lstinline{echo hello}''
-to the shell,
+no shell,
 \lstinline{runcmd}
-would have been called with
+será chamado com
 ``\lstinline{echo hello}''
-as the argument.
-\lstinline{runcmd} 
-runs the actual command. For
+como argumento.
+\lstinline{runcmd}
+executa o comando propriamente dito. Para
 ``\lstinline{echo hello}'',
-it would call
-\lstinline{exec} 
-If
+ele chamaria
+\lstinline{exec}.
+Se
 \lstinline{exec}
-succeeds then the child will execute instructions from
+for bem-sucedido, o filho passará a executar as instruções de
 \lstinline{echo}
-instead of
-\lstinline{runcmd}.  
-At some point
+em vez de
+\lstinline{runcmd}.
+Em algum momento,
 \lstinline{echo}
-will call
+chamará
 \lstinline{exit},
-which will cause the parent to return from
+fazendo com que o pai retorne de
 \lstinline{wait}
-in 
-\lstinline{main}
+em
+\lstinline{main}.
 
-You might wonder why
+Você pode se perguntar por que
 \indexcode{fork}
-and
+e
 \indexcode{exec}
-are not combined in a single call; we will see later that 
-the shell exploits the separation in its implementation of
-I/O redirection.
-To avoid the wastefulness of
-creating a duplicate process and then immediately replacing it (with \lstinline{exec}),
-operating kernels optimize the implementation of
+não são combinadas em uma única chamada; veremos mais adiante que
+o shell se aproveita dessa separação para implementar
+redirecionamento de entrada/saída.
+Para evitar o desperdício de criar um processo duplicado apenas para substituí-lo
+imediatamente (com \lstinline{exec}),
+os kernels modernos otimizam a implementação de
 \lstinline{fork}
-for this use case by using virtual memory techniques such as
-copy-on-write (see Section~\ref{sec:pagefaults}).
+usando técnicas de memória virtual, como
+copy-on-write (ver Seção~\ref{sec:pagefaults}).
 
-Xv6 allocates most user-space memory
-implicitly:
+O xv6 aloca a maior parte da memória do espaço do usuário
+implicitamente:
 \indexcode{fork}
-allocates the memory required for the child's copy of the
-parent's memory, and 
+aloca a memória necessária para a cópia da memória do pai no filho, e
 \indexcode{exec}
-allocates enough memory to hold the executable file.
-A process that needs more memory at run-time (perhaps for
+aloca memória suficiente para carregar o executável.
+Um processo que precisa de mais memória em tempo de execução (por exemplo, para
 \indexcode{malloc})
-can call
+pode chamar
 \lstinline{sbrk(n)}
-to grow its data memory by
-\lstinline{n} zero
-bytes;
+para expandir sua memória de dados em
+\lstinline{n} bytes zero;
 \indexcode{sbrk}
-returns the location of the new memory.
+retorna o endereço da nova memória.
+
 
 %% 
 %% 	I/O and File descriptors
 %% 
-\section{I/O and File descriptors}
+\section{E/S e Descritores de Arquivo}
 
-A 
-\indextext{file descriptor} 
-is a small integer representing a kernel-managed object
-that a process may read from or write to.
-A process may obtain a file descriptor by opening a file, directory,
-or device, or by creating a pipe, or by duplicating an existing
-descriptor.
-For simplicity we'll often refer to the object a file descriptor
-refers to as a ``file'';
-the file descriptor interface abstracts away the differences between
-files, pipes, and devices, making them all look like streams of bytes.
-We'll refer to input and output as \indextext{I/O}.
+Um 
+\indextext{descritor de arquivo}
+é um pequeno número inteiro que representa um objeto gerenciado pelo kernel
+do qual um processo pode ler ou para o qual pode escrever.
+Um processo pode obter um descritor de arquivo ao abrir um arquivo, diretório
+ou dispositivo, ou ao criar um pipe, ou duplicando um descritor
+existente.
+Para simplificar, frequentemente nos referiremos ao objeto associado ao descritor de arquivo
+simplesmente como um ``arquivo'';  
+a interface de descritor de arquivo abstrai as diferenças entre
+arquivos, pipes e dispositivos, fazendo com que todos pareçam fluxos de bytes.
+Chamaremos leitura e escrita de \indextext{E/S} (entrada/saída).
 
-Internally, the xv6 kernel uses the file descriptor
-as an index into a per-process table,
-so that every process has a private space of file descriptors
-starting at zero.
-By convention, a process reads from file descriptor 0 (standard input),
-writes output to file descriptor 1 (standard output), and
-writes error messages to file descriptor 2 (standard error).
-As we will see, the shell exploits the convention to implement I/O redirection
-and pipelines. The shell ensures that it always has three file descriptors
-open
-which are by default file descriptors for the console.
+Internamente, o kernel do xv6 usa o descritor de arquivo
+como um índice em uma tabela por processo,
+de modo que cada processo possui um espaço privado de descritores de arquivo,
+começando pelo zero.
+Por convenção, um processo lê do descritor 0 (entrada padrão),
+escreve na saída padrão pelo descritor 1 e
+escreve mensagens de erro no descritor 2 (erro padrão).
+Como veremos, o shell aproveita essa convenção para implementar redirecionamento de E/S
+e pipelines. O shell garante que sempre tenha três descritores de arquivo
+abertos,
+que, por padrão, estão conectados ao console.
 
-The
+As chamadas de sistema
 \lstinline{read}
-and
+e
 \lstinline{write}
-system calls read bytes from and write bytes to
-open files named by file descriptors.
-The call
-\lstinline{read(fd},
-\lstinline{buf},
-\lstinline{n)}
-reads at most
+leem bytes de e escrevem bytes em
+arquivos abertos identificados por descritores de arquivo.
+A chamada
+\lstinline{read(fd, buf, n)}
+lê no máximo
 \lstinline{n}
-bytes from the file descriptor
+bytes do descritor de arquivo
 \lstinline{fd},
-copies them into
+copia-os para
 \lstinline{buf},
-and returns the number of bytes read.
-Each file descriptor that refers to a file
-has an offset associated with it.
+e retorna o número de bytes lidos.
+Cada descritor de arquivo associado a um arquivo
+possui um deslocamento associado.
 \lstinline{read}
-reads data from the current file offset and then advances
-that offset by the number of bytes read:
-a subsequent
+lê os dados a partir do deslocamento atual do arquivo e então avança
+esse deslocamento pelo número de bytes lidos:
+uma chamada subsequente a
 \lstinline{read}
-will return the bytes following the ones returned by the first
-\lstinline{read}.
-When there are no more bytes to read,
+retornará os bytes seguintes aos da primeira chamada.
+Quando não há mais bytes a serem lidos,
 \lstinline{read}
-returns zero to indicate the end of the file.
+retorna zero, indicando fim de arquivo.
 
-The call
-\lstinline{write(fd},
-\lstinline{buf},
-\lstinline{n)}
-writes
+A chamada
+\lstinline{write(fd, buf, n)}
+escreve
 \lstinline{n}
-bytes from
+bytes de
 \lstinline{buf}
-to the file descriptor
+no descritor de arquivo
 \lstinline{fd}
-and returns the number of bytes written.
-Fewer than
+e retorna o número de bytes escritos.
+Menos de
 \lstinline{n}
-bytes are written only when an error occurs.
-Like
+bytes serão escritos apenas em caso de erro.
+Assim como
 \lstinline{read},
 \lstinline{write}
-writes data at the current file offset and then advances
-that offset by the number of bytes written:
-each
+escreve os dados no deslocamento atual e depois o avança
+de acordo com o número de bytes escritos:
+cada
 \lstinline{write}
-picks up where the previous one left off.
+continua a partir de onde a anterior parou.
 
-The following program fragment (which forms the essence of the program
+O trecho de programa a seguir (que representa a essência do programa
 \lstinline{cat})
-copies data from its standard input
-to its standard output.  If an error occurs, it writes a message
-to the standard error.
+copia dados da entrada padrão
+para a saída padrão. Se ocorrer algum erro, ele escreve uma mensagem
+no erro padrão.
 \begin{lstlisting}[]
 char buf[512];
 int n;
@@ -446,58 +421,54 @@ for(;;){
   if(n == 0)
     break;
   if(n < 0){
-    fprintf(2, "read error\n");
+    fprintf(2, "erro de leitura\n");
     exit(1);
   }
   if(write(1, buf, n) != n){
-    fprintf(2, "write error\n");
+    fprintf(2, "erro de escrita\n");
     exit(1);
   }
 }
 \end{lstlisting}
-The important thing to note in the code fragment is that
+O importante a se notar nesse trecho é que o programa
 \lstinline{cat}
-doesn't know whether it is reading from a file, console, or a pipe.
-Similarly 
+não sabe se está lendo de um arquivo, do console ou de um pipe.
+Da mesma forma,
 \lstinline{cat}
-doesn't know whether it is printing to a console, a file, or whatever.
-The use of file descriptors and the convention that file descriptor 0
-is input and file descriptor 1 is output allows a simple
-implementation
-of 
+não sabe se está escrevendo no console, em um arquivo, ou em outro lugar.
+O uso de descritores de arquivo e a convenção de que o descritor 0
+é a entrada e o descritor 1 é a saída permite uma implementação
+simples do
 \lstinline{cat}.
 
-The
+A chamada de sistema
 \lstinline{close}
-system call
-releases a file descriptor, making it free for reuse by a future
+libera um descritor de arquivo, tornando-o disponível para reutilização por uma futura
+chamada
 \lstinline{open},
-\lstinline{pipe},
-or
+\lstinline{pipe}
+ou
 \lstinline{dup}
-system call (see below).
-A newly allocated file descriptor 
-is always the lowest-numbered unused
-descriptor of the current process.
+(ver abaixo).
+Um novo descritor de arquivo alocado
+é sempre o menor descritor não utilizado
+pelo processo atual.
 
-File descriptors and
+Descritores de arquivo e a chamada
 \indexcode{fork}
-interact to make I/O redirection easy to implement.
+interagem para tornar fácil a implementação de redirecionamento de E/S.
 \lstinline{fork}
-copies the parent's file descriptor table along with its memory,
-so that the child starts with exactly the same open files as the parent.
-The system call
+copia a tabela de descritores de arquivo do processo pai junto com sua memória,
+de modo que o filho inicia com exatamente os mesmos arquivos abertos que o pai.
+A chamada de sistema
 \indexcode{exec}
-replaces the calling process's memory but preserves its file table.
-This behavior allows the shell to
-implement \indextext{I/O redirection} by forking,
-re-opening chosen file descriptors in the child,
-and then calling \lstinline{exec} to run the new program.
-Here is a simplified version of the code a shell runs for the
-command
-\lstinline{cat}
-\lstinline{<}
-\lstinline{input.txt}:
+substitui a memória do processo chamador, mas preserva sua tabela de arquivos.
+Esse comportamento permite que o shell
+implemente \indextext{redirecionamento de E/S} fazendo fork,
+reabrindo os descritores de arquivo desejados no filho
+e, então, chamando \lstinline{exec} para executar o novo programa.
+Aqui está uma versão simplificada do código que um shell executa para o comando
+\lstinline{cat < input.txt}:
 \begin{lstlisting}[]
 char *argv[2];
 
@@ -509,64 +480,63 @@ if(fork() == 0) {
   exec("cat", argv);
 }
 \end{lstlisting}
-After the child closes file descriptor 0,
+Após o processo filho fechar o descritor de arquivo 0,
 \lstinline{open}
-is guaranteed to use that file descriptor
-for the newly opened
+garantidamente usará esse descritor
+para abrir
 \lstinline{input.txt}:
-0 will be the smallest available file descriptor.
+0 será o menor descritor disponível.
+O programa
 \lstinline{cat}
-then executes with file descriptor 0 (standard input) referring to
+executará com o descritor 0 (entrada padrão) referindo-se a
 \lstinline{input.txt}.
-The parent process's file descriptors are not changed by this
-sequence, since it modifies only the child's descriptors.
+Os descritores do processo pai não são afetados por essa
+sequência, pois ela modifica apenas os descritores do filho.
 
-The code for I/O redirection in the xv6 shell works in exactly this way
-Recall that at this point in the code the shell has already forked the
-child shell and that 
-\lstinline{runcmd} 
-will call
+O código de redirecionamento de E/S no shell do xv6 funciona exatamente dessa forma.
+Lembre-se de que, nesse ponto do código, o shell já fez fork do
+processo filho, e
+\lstinline{runcmd}
+chamará
 \lstinline{exec}
-to load the new program.
+para carregar o novo programa.
 
-The second argument to \lstinline{open} consists of a set of
-flags, expressed as bits, that control what \lstinline{open}
-does. The possible values are defined in the file control (fcntl) header
+O segundo argumento de \lstinline{open} consiste em um conjunto de
+flags, expressos como bits, que controlam o comportamento da chamada \lstinline{open}.
+Os valores possíveis são definidos no cabeçalho de controle de arquivos (fcntl):
 \lstinline{O_RDONLY},
 \lstinline{O_WRONLY},
 \lstinline{O_RDWR},
-\lstinline{O_CREATE}, and
+\lstinline{O_CREATE}, e
 \lstinline{O_TRUNC},
-which instruct \lstinline{open} to
-open the file for reading,
-or for writing,
-or for both reading and writing,
-to create the file if it doesn't exist,
-and to truncate the file to zero length.
+que instruem \lstinline{open} a
+abrir o arquivo para leitura,
+ou para escrita,
+ou para leitura e escrita,
+a criar o arquivo se ele não existir,
+e a truncar (zerar) o arquivo.
 
-Now it should be clear why it is helpful that
+Agora fica claro por que é útil que
 \lstinline{fork}
-and 
-\lstinline{exec} 
-are separate calls: between the two, the shell has a chance
-to redirect the child's I/O without disturbing the I/O setup of the main shell.
-One could instead imagine a hypothetical combined
-\lstinline{forkexec} system call,
-but the options for doing I/O redirection with such a call
-seem awkward.
-The shell could modify its own I/O
-setup before calling \lstinline{forkexec} (and then
-un-do those modifications); or
-\lstinline{forkexec} could take instructions for I/O
-redirection as arguments;
-or (least attractively) every program like \lstinline{cat} could
-be taught to do its own I/O redirection.
+e
+\lstinline{exec}
+sejam chamadas separadas: entre elas, o shell tem a chance
+de redirecionar a E/S do processo filho sem afetar a configuração de E/S do shell principal.
+Pode-se imaginar uma hipotética chamada combinada
+\lstinline{forkexec},
+mas as opções para redirecionamento de E/S com essa chamada
+seriam complicadas.
+O shell teria que modificar sua própria E/S antes de chamar \lstinline{forkexec} (e então
+desfazer as modificações); ou
+\lstinline{forkexec} teria que aceitar instruções de redirecionamento como argumentos;
+ou (menos desejável) cada programa como \lstinline{cat}
+teria que ser modificado para fazer seu próprio redirecionamento.
 
-Although
+Embora
 \lstinline{fork}
-copies the file descriptor table, each underlying file offset is shared
-between parent and child.
-Consider this example:
+copie a tabela de descritores de arquivos, o deslocamento interno de cada arquivo é compartilhado
+entre pai e filho.
+Considere este exemplo:
 \begin{lstlisting}[]
 if(fork() == 0) {
   write(1, "hello ", 6);
@@ -576,94 +546,80 @@ if(fork() == 0) {
   write(1, "world\n", 6);
 }
 \end{lstlisting}
-At the end of this fragment, the file attached to file descriptor 1
-will contain the data
+Ao final desse trecho, o arquivo associado ao descritor 1
+conterá os dados
 \lstinline{hello}
 \lstinline{world}.
-The
+A chamada
 \lstinline{write}
-in the parent
-(which, thanks to
+no processo pai
+(que, graças ao
 \lstinline{wait},
-runs only after the child is done)
-picks up where the child's
+executa apenas após o filho terminar)
+continua a partir do ponto onde a chamada
 \lstinline{write}
-left off.
-This behavior helps produce sequential output from sequences
-of shell commands, like
-\lstinline{(echo}
-\lstinline{hello};
-\lstinline{echo}
-\lstinline{world)}
-\lstinline{>output.txt}.
+do filho parou.
+Esse comportamento ajuda a produzir saídas sequenciais de comandos do shell como:
+\lstinline{(echo hello; echo world) >output.txt}.
 
-The
+A chamada
 \lstinline{dup}
-system call duplicates an existing file descriptor,
-returning a new one that refers to the same underlying I/O object.
-Both file descriptors share an offset, just as the file descriptors
-duplicated by
-\lstinline{fork}
-do.
-This is another way to write
-\lstinline{hello}
-\lstinline{world}
-into a file:
+duplica um descritor de arquivo existente,
+retornando um novo que se refere ao mesmo objeto de E/S.
+Ambos os descritores compartilham o mesmo deslocamento, assim como os descritores
+duplicados por
+\lstinline{fork}.
+Esta é outra maneira de escrever
+\lstinline{hello world}
+em um arquivo:
 \begin{lstlisting}[]
 fd = dup(1);
 write(1, "hello ", 6);
 write(fd, "world\n", 6);
 \end{lstlisting}
 
-Two file descriptors share an offset if they were derived from
-the same original file descriptor by a sequence of
+Dois descritores compartilham o deslocamento se derivarem do
+mesmo descritor original por meio de chamadas de
 \lstinline{fork}
-and
-\lstinline{dup}
-calls.
-Otherwise file descriptors do not share offsets, even if they
-resulted from 
+e
+\lstinline{dup}.
+Caso contrário, os descritores não compartilham deslocamento, mesmo que resultem de
+chamadas
 \lstinline{open}
-calls for the same file.  
-\lstinline{dup} 
-allows shells to implement commands like this:
-\lstinline{ls}
-\lstinline{existing-file}
-\lstinline{non-existing-file}
-\lstinline{>}
-\lstinline{tmp1}
-\lstinline{2>&1}.
-The
+para o mesmo arquivo.
+\lstinline{dup}
+permite que shells implementem comandos como:
+\lstinline{ls existing-file non-existing-file >tmp1 2>&1}.
+O trecho
 \lstinline{2>&1}
-tells the shell to give the command a file descriptor 2 that
-is a duplicate of descriptor 1.
-Both the name of the existing file and the error message for the
-non-existing file will show up in the file
+informa ao shell que o descritor 2 deve ser uma duplicata do descritor 1.
+Tanto o nome do arquivo existente quanto a mensagem de erro do arquivo
+inexistente aparecerão no arquivo
 \lstinline{tmp1}.
-The xv6 shell doesn't support I/O redirection for the error file
-descriptor, but now you know how to implement it.
+O shell do xv6 não suporta redirecionamento de E/S para o descritor de erro,
+mas agora você sabe como implementá-lo.
 
-File descriptors are a powerful abstraction,
-because they hide the details of what they are connected to:
-a process writing to file descriptor 1 may be writing to a
-file, to a device like the console, or to a pipe.
+Descritores de arquivos são uma abstração poderosa,
+pois escondem os detalhes do que está conectado a eles:
+um processo escrevendo no descritor 1 pode estar escrevendo em um
+arquivo, em um dispositivo como o console ou em um pipe.
+
 %% 
 %% 	Pipes
 %% 
 \section{Pipes}
 
-A 
-\indextext{pipe} 
-is a small kernel buffer exposed to processes as a pair of
-file descriptors, one for reading and one for writing.
-Writing data to one end of the pipe
-makes that data available for reading from the other end of the pipe.
-Pipes provide a way for processes to communicate.
+Um 
+\indextext{pipe}
+é um pequeno buffer no kernel exposto aos processos como um par de
+descritores de arquivo: um para leitura e outro para escrita.
+Escrever dados em uma extremidade do pipe
+torna esses dados disponíveis para leitura na outra extremidade.
+Pipes fornecem um meio de comunicação entre processos.
 
-The following example code runs the program
+O código de exemplo a seguir executa o programa
 \lstinline{wc}
-with standard input connected to
-the read end of a pipe.
+com a entrada padrão conectada à extremidade de leitura de um pipe.
 \begin{lstlisting}[]
 int p[2];
 char *argv[2];
@@ -684,154 +640,137 @@ if(fork() == 0) {
   close(p[1]);
 }
 \end{lstlisting}
-The program calls
+
+O programa chama
 \lstinline{pipe},
-which creates a new pipe and records the read and write
-file descriptors in the array
+que cria um novo pipe e armazena os descritores de leitura e escrita
+no array
 \lstinline{p}.
-After
+Após o
 \lstinline{fork},
-both parent and child have file descriptors referring to the pipe.
-The child calls \lstinline{close} and \lstinline{dup} to make file descriptor
-zero refer to the read end of the pipe,
-closes the file descriptors in
+tanto o processo pai quanto o processo filho possuem descritores de arquivo
+referentes ao pipe.
+O processo filho chama \lstinline{close} e \lstinline{dup} para fazer com que o descritor 0
+passe a se referir à extremidade de leitura do pipe,
+fecha os descritores do array
 \lstinline{p},
-and calls \lstinline{exec} to run
+e chama \lstinline{exec} para executar
 \lstinline{wc}.
-When 
+Quando
 \lstinline{wc}
-reads from its standard input, it reads from the pipe.
-The parent closes the read side of the pipe,
-writes to the pipe,
-and then closes the write side.
+lê da entrada padrão, ele estará lendo do pipe.
+O processo pai fecha o lado de leitura do pipe,
+escreve no pipe,
+e então fecha o lado de escrita.
 
-If no data is available, a
+Se não houver dados disponíveis, uma chamada
 \lstinline{read}
-on a pipe waits for either data to be written or for all
-file descriptors referring to the write end to be closed;
-in the latter case,
+em um pipe espera até que dados sejam escritos ou até que todos os
+descritores referentes à extremidade de escrita sejam fechados;
+neste último caso,
 \lstinline{read}
-will return 0, just as if the end of a data file had been reached.
-The fact that
+retorna zero, assim como quando se chega ao final de um arquivo.
+O fato de que
 \lstinline{read}
-blocks until it is impossible for new data to arrive
-is one reason that it's important for the child to
-close the write end of the pipe
-before executing
+bloqueia até que seja impossível novos dados chegarem
+é uma das razões pelas quais é importante que o processo filho
+feche a extremidade de escrita do pipe
+antes de executar
 \lstinline{wc}
-above: if one of
-\lstinline{wc} 's
-file descriptors referred to the write end of the pipe,
+no exemplo acima: se algum dos descritores do
 \lstinline{wc}
-would never see end-of-file.
+ainda referisse a extremidade de escrita,
+\lstinline{wc}
+nunca veria o fim de arquivo.
 
-The xv6 shell implements pipelines such as
+O shell do xv6 implementa pipelines como
 \lstinline{grep fork sh.c | wc -l}
-in a manner similar to the above code
-The child process creates a pipe to connect the left end of the pipeline
-with the right end. Then it calls
+de maneira semelhante ao código acima.
+O processo filho cria um pipe para conectar a extremidade esquerda do pipeline
+com a extremidade direita. Em seguida, ele chama
 \lstinline{fork}
-and
+e
 \lstinline{runcmd}
-for the left end of the pipeline
-and 
+para a extremidade esquerda do pipeline,
+e depois chama
 \lstinline{fork}
-and
+e
 \lstinline{runcmd}
-for the right end, and waits for both to finish.
-The right end of the pipeline may be a command that itself includes a
-pipe (e.g.,
-\lstinline{a}
-\lstinline{|}
+para a extremidade direita, e espera que ambos terminem.
+A extremidade direita do pipeline pode ser um comando que por sua vez inclua outro
+pipe (por exemplo,
+\lstinline{a | b | c}),
+o que leva à criação de dois novos processos filhos (um para
 \lstinline{b}
-\lstinline{|}
-\lstinline{c)}, 
-which itself forks two new child processes (one for
-\lstinline{b}
-and one for
+e outro para
 \lstinline{c}).
-Thus, the shell may
-create a tree of processes.  The leaves of this tree are commands and
-the interior nodes are processes that wait until the left and right
-children complete.
+Assim, o shell pode criar uma árvore de processos. As folhas dessa árvore são os comandos,
+e os nós internos são processos que esperam até que seus filhos à esquerda e à direita terminem.
 
-% In principle, one could have the interior nodes run the left end of a
-% pipeline, but doing so correctly would complicate the
-% implementation. Consider making just the following modification:
-% change \lstinline{sh.c} to not fork for \lstinline{p->left} and run
-% \lstinline{runcmd(p->left)} in the interior process. Then, for
-% example, \lstinline{echo hi | wc} won't produce output, because when
-% \lstinline{echo hi} exits in \lstinline{runcmd}, the interior process
-% exits and never calls fork to run the right end of the pipe.  This
-% incorrect behavior could be fixed by not calling \lstinline{exit} in
-% \lstinline{runcmd} for interior processes, but this fix complicates
-% the code: now \lstinline{runcmd} needs to know if it's in an interior
-% process or not.  Complications also arise when not forking for
-% \lstinline{runcmd(p->right)}.  For example, with just that
-% modification, \lstinline{sleep 10 | echo hi} will immediately print
-% ``hi' and a new prompt, instead of after 10 seconds; this happens because \lstinline{echo} runs
-% immediately and exits, not waiting for \lstinline{sleep} to finish.
-% Since the goal of the \lstinline{sh.c} is to be as simple as possible,
-% it doesn't try to avoid creating interior processes.
-
-Pipes may seem no more powerful than temporary files:
-the pipeline
+Pipes podem parecer não ser mais poderosos do que arquivos temporários:
+o pipeline
 \begin{lstlisting}[]
 echo hello world | wc
 \end{lstlisting}
-could be implemented without pipes as
+poderia ser implementado sem pipes como:
 \begin{lstlisting}[]
 echo hello world >/tmp/xyz; wc </tmp/xyz
 \end{lstlisting}
-Pipes have at least three advantages over temporary files
-in this situation.
-First, pipes automatically clean themselves up;
-with the file redirection, a shell would have to
-be careful to remove
+Mas os pipes possuem ao menos três vantagens sobre arquivos temporários
+nesta situação.
+
+Primeiro, pipes se limpam automaticamente;
+com redirecionamento de arquivos, o shell precisaria
+se preocupar em remover
 \lstinline{/tmp/xyz}
-when done.
-Second, pipes can pass arbitrarily long streams of
-data, while file redirection requires enough free space
-on disk to store all the data.
-Third, pipes allow for parallel execution of pipeline stages,
-while the file approach requires the first program to finish
-before the second starts.
-% Fourth, if you are implementing inter-process communication,
-% pipes' blocking reads and writes are more efficient
-% than the non-blocking semantics of files.
+ao final da execução.
+
+Segundo, pipes podem transmitir fluxos de dados arbitrariamente longos,
+enquanto o redirecionamento para arquivos exige espaço livre em disco
+suficiente para armazenar todos os dados.
+
+Terceiro, pipes permitem a execução paralela das etapas do pipeline,
+enquanto a abordagem com arquivos exige que o primeiro programa finalize
+antes do segundo começar.
+
+% Quarto, se você estiver implementando comunicação entre processos,
+% pipes com leituras e escritas bloqueantes são mais eficientes
+% do que arquivos com semântica não bloqueante.
+
 %% 
 %% 	File system
 %% 
-\section{File system}
+\section{Sistema de arquivos}
 
-The xv6 file system provides data files,
-which contain uninterpreted byte arrays,
-and directories, which
-contain named references to data files and other directories.
-The directories form a tree, starting
-at a special directory called the 
-\indextext{root}.
-A 
-\indextext{path} 
-like
+O sistema de arquivos do xv6 fornece arquivos de dados,
+que contêm arrays de bytes não interpretados,
+e diretórios, que
+contêm referências nomeadas para arquivos de dados e outros diretórios.
+Os diretórios formam uma árvore, começando
+em um diretório especial chamado
+\indextext{raiz} (root).
+Um
+\indextext{caminho} (path)
+como
 \lstinline{/a/b/c}
-refers to the file or directory named
+refere-se ao arquivo ou diretório chamado
 \lstinline{c}
-inside the directory named
-\lstinline{b}
-inside the directory named
-\lstinline{a}
-in the root directory
+dentro do diretório chamado
+\lstinline{b},
+dentro do diretório chamado
+\lstinline{a},
+no diretório raiz
 \lstinline{/}.
-Paths that don't begin with
+Caminhos que não começam com
 \lstinline{/}
-are evaluated relative to the calling process's
-\indextext{current directory},
-which can be changed with the
-\lstinline{chdir}
-system call.
-Both these code fragments open the same file
-(assuming all the directories involved exist):
+são avaliados em relação ao
+\indextext{diretório atual}
+do processo chamador,
+que pode ser alterado com a chamada de sistema
+\lstinline{chdir}.
+Ambos os trechos de código a seguir abrem o mesmo arquivo
+(assumindo que todos os diretórios existam):
+
 \begin{lstlisting}[]
 chdir("/a");
 chdir("b");
@@ -839,255 +778,239 @@ open("c", O_RDONLY);
 
 open("/a/b/c", O_RDONLY);
 \end{lstlisting}
-The first fragment changes the process's current directory to
-\lstinline{/a/b};
-the second neither refers to nor changes the process's current directory.
 
-There are system calls to create new files and directories:
+O primeiro trecho altera o diretório atual do processo para
+\lstinline{/a/b};
+o segundo não altera nem depende do diretório atual do processo.
+
+Existem chamadas de sistema para criar novos arquivos e diretórios:
 \lstinline{mkdir}
-creates a new directory,
+cria um novo diretório,
 \lstinline{open}
-with the
+com a flag
 \lstinline{O_CREATE}
-flag creates a new data file,
-and
+cria um novo arquivo de dados,
+e
 \lstinline{mknod}
-creates a new device file.
-This example illustrates all three:
+cria um novo arquivo de dispositivo.
+Este exemplo ilustra os três casos:
 \begin{lstlisting}[]
 mkdir("/dir");
 fd = open("/dir/file", O_CREATE|O_WRONLY);
 close(fd);
 mknod("/console", 1, 1);
 \end{lstlisting}
+
 \lstinline{mknod}
-creates a special file that refers to a device.
-Associated with a device file are
-the major and minor device numbers
-(the two arguments to 
+cria um arquivo especial que se refere a um dispositivo.
+Associados a um arquivo de dispositivo estão
+o número major e o número minor do dispositivo
+(os dois argumentos de
 \lstinline{mknod}),
-which uniquely identify a kernel device.
-When a process later opens a device file, the kernel
-diverts
+que identificam de forma única um dispositivo do kernel.
+Quando um processo posteriormente abre um arquivo de dispositivo, o kernel
+desvia as chamadas de sistema
 \lstinline{read}
-and
+e
 \lstinline{write}
-system calls to the kernel device implementation
-instead of passing them to the file system.
+para a implementação do dispositivo no kernel,
+em vez de passá-las ao sistema de arquivos.
 
-A file's name is distinct from the file itself;
-the same underlying file, called an 
-\indextext{inode}, 
-can have multiple names,
-called 
+O nome de um arquivo é distinto do próprio arquivo;
+o mesmo arquivo subjacente, chamado
+\indextext{inode},
+pode ter vários nomes,
+chamados
 \indextext{links}.
-Each link consists of an entry in a directory;
-the entry contains a file name and a reference
-to an inode.
-An inode holds
-\indextext{metadata}
-about a file, including
-its type (file or directory or device),
-its length,
-the location of the file's content on disk,
-and the number of links to a file.
+Cada link consiste em uma entrada de diretório;
+essa entrada contém um nome de arquivo e uma referência
+a um inode.
+Um inode armazena
+\indextext{metadados}
+sobre um arquivo, incluindo
+seu tipo (arquivo, diretório ou dispositivo),
+seu tamanho,
+a localização do conteúdo do arquivo no disco
+e o número de links associados ao arquivo.
 
-The
+A chamada de sistema
 \lstinline{fstat}
-system call
-retrieves information from the inode that a
-file descriptor refers to.
-It fills in a
-\lstinline{struct}
-\lstinline{stat},
-defined in
+recupera informações do inode ao qual um
+descritor de arquivo se refere.
+Ela preenche uma
+\lstinline{struct stat},
+definida em
 \lstinline{stat.h} \fileref{kernel/stat.h}
-as:
+como:
 \begin{lstlisting}[]
-#define T_DIR     1   // Directory
-#define T_FILE    2   // File
-#define T_DEVICE  3   // Device
+#define T_DIR     1   // Diretório
+#define T_FILE    2   // Arquivo
+#define T_DEVICE  3   // Dispositivo
 
 struct stat {
-  int dev;     // File system's disk device
-  uint ino;    // Inode number
-  short type;  // Type of file
-  short nlink; // Number of links to file
-  uint64 size; // Size of file in bytes
+  int dev;     // Dispositivo de disco do sistema de arquivos
+  uint ino;    // Número do inode
+  short type;  // Tipo de arquivo
+  short nlink; // Número de links para o arquivo
+  uint64 size; // Tamanho do arquivo em bytes
 };
 \end{lstlisting}
 
-The
+A chamada de sistema
 \lstinline{link}
-system call creates another file system name 
-referring to the same inode as an existing file.
-This fragment creates a new file named both
+cria outro nome no sistema de arquivos
+referente ao mesmo inode de um arquivo existente.
+Este trecho cria um novo arquivo com os nomes
 \lstinline{a}
-and
-\lstinline{b}.
+e
+\lstinline{b}:
 \begin{lstlisting}[]
 open("a", O_CREATE|O_WRONLY);
 link("a", "b");
 \end{lstlisting}
-Reading from or writing to
+Ler ou escrever em
 \lstinline{a}
-is the same as reading from or writing to
+é o mesmo que ler ou escrever em
 \lstinline{b}.
-Each inode is identified by a unique
-\textit{inode}
-\textit{number}.
-After the code sequence above, it is possible
-to determine that
+Cada inode é identificado por um número único de
+\textit{inode}.
+Após a execução do código acima, é possível
+verificar que
 \lstinline{a}
-and
+e
 \lstinline{b}
-refer to the same underlying contents by inspecting the
-result of 
+referem-se ao mesmo conteúdo subjacente, inspecionando o resultado de
 \lstinline{fstat}:
-both will return the same inode number 
+ambos retornarão o mesmo número de inode
 (\lstinline{ino}),
-and the
+e a contagem de
 \lstinline{nlink}
-count will be set to 2.
+será 2.
 
-The
+A chamada de sistema
 \lstinline{unlink}
-system call removes a name from the file system.
-The file's inode and the disk space holding its content
-are only freed when the file's link count is zero and
-no file descriptors refer to it.
-Thus adding
+remove um nome do sistema de arquivos.
+O inode e o espaço de disco associado ao conteúdo do arquivo
+só são liberados quando a contagem de links for zero e
+nenhum descritor de arquivo estiver referenciando o arquivo.
+Assim, ao adicionar:
 \begin{lstlisting}[]
 unlink("a");
 \end{lstlisting}
-to the last code sequence leaves the inode
-and file content accessible as
+ao código anterior, o inode
+e o conteúdo do arquivo continuam acessíveis por meio de
 \lstinline{b}.
-Furthermore,
+Além disso, o trecho:
 \begin{lstlisting}[]
 fd = open("/tmp/xyz", O_CREATE|O_RDWR);
 unlink("/tmp/xyz");
 \end{lstlisting}
-is an idiomatic way to create a temporary inode 
-with no name
-that will be cleaned up when the process closes 
+é uma forma idiomática de criar um inode temporário
+sem nome,
+que será automaticamente removido quando o processo fechar
 \lstinline{fd}
-or exits.
+ou terminar sua execução.
 
-Unix provides
-file utilities callable from the shell
-as user-level programs, for example
+O Unix fornece
+utilitários de arquivos que podem ser chamados a partir do shell
+como programas de usuário, por exemplo
 \lstinline{mkdir},
-\lstinline{ln},
-and
+\lstinline{ln}
+e
 \lstinline{rm}.
-This design allows anyone to extend the command-line interface
-by adding new user-level programs.  In hindsight this plan seems obvious,
-but other systems designed at the time of Unix often built such commands into
-the shell (and built the shell into the kernel).
+Esse design permite que qualquer pessoa estenda a interface de linha de comando
+adicionando novos programas de usuário.
+Em retrospecto, esse plano parece óbvio,
+mas outros sistemas projetados na mesma época que o Unix muitas vezes embutiam tais comandos diretamente
+no shell (e até mesmo o shell no kernel).
 
-One exception is
+Uma exceção é o comando
 \lstinline{cd},
-which is built into the shell
+que é incorporado ao próprio shell.
 \lstinline{cd}
-must change the current working directory of the
-shell itself.  If
+precisa alterar o diretório de trabalho atual do
+próprio shell.
+Se
 \lstinline{cd}
-were run as a regular command, then the shell would fork a child
-process, the child process would run
+fosse executado como um comando comum, o shell faria um
+\textit{fork} de um processo filho, e o processo filho executaria
 \lstinline{cd},
-and
-\lstinline{cd}
-would change the 
-\textit{child} 's 
-working directory.  The parent's (i.e.,
-the shell's) working directory would not change.
+mudando o diretório de trabalho do
+\textit{filho},
+mas o diretório de trabalho do processo pai (ou seja, o shell)
+permaneceria inalterado.
+
 %% 
 %% 	Real world
 %% 
-\section{Real world}
+\section{Mundo real}
 
-Unix's combination of ``standard'' file
-descriptors, pipes, and convenient shell syntax for
-operations on them was a major advance in writing
-general-purpose reusable programs.
-The idea sparked a culture of ``software tools'' that was
-responsible for much of Unix's power and popularity,
-and the shell was the first so-called ``scripting language.''
-The Unix system call interface persists today in systems like
-BSD, Linux, and macOS.
+A combinação do Unix de descritores de arquivos “padrão”,
+pipes e uma sintaxe de shell conveniente para operações sobre eles
+foi um grande avanço na escrita de programas reutilizáveis de propósito geral.
+Essa ideia deu origem a uma cultura de “ferramentas de software” que foi
+responsável por grande parte do poder e da popularidade do Unix,
+e o shell foi a primeira chamada “linguagem de script”.
+A interface de chamadas de sistema do Unix persiste até hoje em sistemas como
+BSD, Linux e macOS.
 
-The Unix system call interface has been standardized through the Portable
-Operating System Interface (POSIX) standard.
-Xv6 is
-\textit{not}
-POSIX compliant:  it is missing many system calls (including basic ones such as
+A interface de chamadas de sistema do Unix foi padronizada através do padrão
+Portable Operating System Interface (POSIX).
+O xv6
+\textit{não}
+é compatível com POSIX: ele carece de muitas chamadas de sistema (incluindo algumas básicas como
 \lstinline{lseek}),
-and many of the system calls it does provide differ from the standard.
-Our main goals for xv6 are
-simplicity and clarity while providing a simple UNIX-like system-call interface.
-Several people have extended xv6 with a few more system calls and a simple
-C library in order to run basic Unix programs.  Modern kernels, however,
-provide many more system calls, and many more kinds of kernel services, than
-xv6.  For example, they support networking, windowing systems, user-level threads,
-drivers for many devices, and so on.  Modern kernels evolve continuously and
-rapidly, and offer many features beyond POSIX.
+e muitas das chamadas que ele fornece diferem do padrão.
+Nossos principais objetivos com o xv6 são
+simplicidade e clareza, ao mesmo tempo em que fornece uma interface de chamadas de sistema simples e semelhante ao UNIX.
+Várias pessoas estenderam o xv6 com algumas chamadas de sistema adicionais e uma biblioteca C simples para executar programas Unix básicos.
+No entanto, kernels modernos fornecem muitas mais chamadas de sistema e tipos de serviços do kernel do que o xv6.
+Por exemplo, eles suportam redes, sistemas de janelas, threads em nível de usuário,
+drivers para muitos dispositivos e assim por diante.
+Kernels modernos evoluem continuamente e rapidamente,
+e oferecem muitos recursos além do POSIX.
 
-Unix unified access to multiple types of resources (files,
-directories, and devices) with a single set of 
-file-name and file-descriptor interfaces.
-This idea can be extended to more kinds of resources;
-a good example is Plan 9~\cite{Presotto91plan9},
-which applied the ``resources are files''
-concept to 
-networks, graphics, and more.
-However, most Unix-derived operating systems have
-not followed this route.
+O Unix unificou o acesso a múltiplos tipos de recursos (arquivos,
+diretórios e dispositivos) com um único conjunto de interfaces
+baseadas em nomes de arquivos e descritores de arquivos.
+Essa ideia pode ser estendida a mais tipos de recursos;
+um bom exemplo é o sistema Plan 9~\cite{Presotto91plan9},
+que aplicou o conceito de “recursos são arquivos”
+a redes, gráficos e mais.
+No entanto, a maioria dos sistemas operacionais derivados do Unix
+não seguiu esse caminho.
 
-The file system and file descriptors have been  powerful
-abstractions.
-Even so, there are other models for operating system interfaces.
-Multics, a predecessor of Unix,
-abstracted file storage in a way that made it look like memory,
-producing a very different flavor of interface.
-The complexity of the Multics design had a direct influence
-on the designers of Unix, who aimed to build something simpler.
-% XXX can we cut this, since its point is the same as the next paragraph?
-% An operating system interface that went out of fashion
-% decades ago but has recently returned is the idea of a virtual machine monitor.
-% Such systems provide a superficially different interface from xv6,
-% but the basic concepts are still the same:
-% a virtual machine, like a process, consists of some memory and
-% one or more register sets;
-% the virtual machine has access to one large file called
-% a virtual disk instead of a file system;
-% virtual machines send messages to each other
-% and the outside world using virtual network devices
-% instead of pipes or files.
+O sistema de arquivos e os descritores de arquivos têm sido abstrações poderosas.
+Ainda assim, existem outros modelos para interfaces de sistemas operacionais.
+O Multics, predecessor do Unix,
+abstraía o armazenamento de arquivos de forma que o tornava semelhante à memória,
+resultando em uma interface com uma abordagem bastante diferente.
+A complexidade do projeto do Multics teve influência direta
+nos projetistas do Unix, que buscaram criar algo mais simples.
 
-Xv6 does not provide a notion of users or of protecting
-one user from another; in Unix terms, all xv6 processes
-run as root.
+O xv6 não fornece a noção de usuários ou proteção
+entre usuários; em termos de Unix, todos os processos no xv6
+são executados como root.
 
-This book examines how xv6 implements its Unix-like interface,
-but the ideas and concepts apply to more than just Unix.
-Any operating system must multiplex processes onto
-the underlying hardware, isolate processes from each
-other, and provide mechanisms for controlled
-inter-process communication.
-After studying xv6, you should be able to
-look at other, more complex operating systems
-and see the concepts underlying xv6 in those systems as well.
+Este livro examina como o xv6 implementa sua interface semelhante ao Unix,
+mas as ideias e conceitos se aplicam a mais do que apenas ao Unix.
+Qualquer sistema operacional deve multiplexar processos sobre o
+hardware subjacente, isolar processos entre si
+e fornecer mecanismos para comunicação interprocessos controlada.
+Após estudar o xv6, você deverá ser capaz de
+analisar outros sistemas operacionais mais complexos
+e reconhecer neles os conceitos fundamentais do xv6.
 
-%% 
-\section{Exercises}
+%%
+\section{Exercícios}
 %%
 
 \begin{enumerate}
 
-\item Write a program that uses UNIX system calls to
-``ping-pong'' a byte between two processes over a pair
-of pipes, one for each direction. Measure the
-program's performance, in exchanges per second.
+\item Escreva um programa que utilize chamadas de sistema UNIX para
+fazer um “ping-pong” de um byte entre dois processos usando um par
+de pipes, um para cada direção. Meça o
+desempenho do programa, em trocas por segundo.
 
 \end{enumerate}
+
