@@ -1,5 +1,7 @@
 \documentclass[12pt]{book}
 \usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
 \usepackage{times}
 \usepackage{listings}
 \usepackage{graphicx}
@@ -12,7 +14,16 @@
 \usepackage{etoolbox}  % for showidx
 \usepackage{fullpage}
 \usepackage{soul}
-\usepackage[utf8]{inputenc}
+
+\lstset{
+    literate=  % Define substituições para caracteres especiais
+    {á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+    {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+    {ã}{{\~a}}1 {õ}{{\~o}}1 {Ã}{{\~A}}1 {Õ}{{\~O}}1
+    {ç}{{\c c}}1 {Ç}{{\c C}}1,
+    basicstyle=\ttfamily\small, % Estilo básico do código
+    commentstyle=\color{gray},   % Estilo dos comentários
+}
 
 \usepackage{hyperref}  % should be last
 
@@ -45,8 +56,8 @@
 %% for publishing book without notes
 %\renewcommand{\insertnote}[3]{}
 
-\title{\textbf{xv6: a simple, Unix-like teaching operating system}}
-\author{Russ Cox \and Frans Kaashoek \and Robert Morris}
+\title{\textbf{xv6: um sistema operacional simples, tipo Unix, para ensino}}
+\author{Russ Cox \and Frans Kaashoek \and Robert Morris \and Alan Veloso (Tradutor)}
 
 \makeindex
 

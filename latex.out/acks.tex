@@ -1,39 +1,23 @@
-\chapter*{Foreword and acknowledgments}
+\chapter*{Prefácio e Agradecimentos}
 
+Este é um texto preliminar destinado a uma disciplina sobre sistemas operacionais.  
+Ele explica os principais conceitos de sistemas operacionais por meio do estudo de um kernel de exemplo, chamado xv6.  
+O xv6 é inspirado no Unix Version 6 (v6) de Dennis Ritchie e Ken Thompson~\cite{unix}.  
+O xv6 segue de forma livre a estrutura e o estilo do v6, mas é implementado em ANSI C~\cite{kernighan} para uma arquitetura RISC-V multicore~\cite{riscv}.
 
-This is a draft text intended for a class on operating systems. It
-explains the main concepts of operating systems by studying an example
-kernel, named xv6.  Xv6 is modeled on Dennis Ritchie's and
-Ken Thompson's Unix Version 6 (v6)~\cite{unix}.  Xv6 loosely follows the structure
-and style of v6, but is implemented in ANSI C~\cite{kernighan} for 
-a multi-core RISC-V~\cite{riscv}.
+Este texto deve ser lido em conjunto com o código-fonte do xv6,  
+uma abordagem inspirada no comentário de John Lions sobre o UNIX 6ª Edição~\cite{lions};  
+o texto possui hiperlinks para o código-fonte em  
+\url{https://github.com/mit-pdos/xv6-riscv}.  
+Consulte também  
+\url{https://pdos.csail.mit.edu/6.1810}  
+para recursos online adicionais sobre o v6 e o xv6, incluindo diversos exercícios práticos utilizando o xv6.
 
-This text should be read along with the source code for xv6, an
-approach inspired by John Lions' Commentary on UNIX 6th
-Edition~\cite{lions}; the text has hyperlinks to the source code at
-\url{https://github.com/mit-pdos/xv6-riscv}. See
-\url{https://pdos.csail.mit.edu/6.1810} for additional pointers to
-on-line resources for v6 and xv6, including several lab assignments
-using xv6.
+Utilizamos este texto nos cursos 6.828 e 6.1810, disciplinas de sistemas operacionais no MIT.  
+Agradecemos ao corpo docente, assistentes de ensino e estudantes dessas turmas, que direta ou indiretamente contribuíram com o xv6.  
+Em particular, gostaríamos de agradecer a Adam Belay, Austin Clements e Nickolai Zeldovich.  
+Finalmente, agradecemos às pessoas que nos enviaram relatórios de erros no texto ou sugestões de melhorias:  
+Abutalib Aghayev, Sebastian Boehm, brandb97, Anton Burtsev, Raphael Carvalho, Tej Chajed, Brendan Davidson, Rasit Eskicioglu, Color Fuzzy, Wojciech Gac, Giuseppe, Tao Guo, Haibo Hao, Naoki Hayama, Chris Henderson, Robert Hilderman, Eden Hochbaum, Wolfgang Keller, Paweł Kraszewski, Henry Laih, Jin Li, Austin Liew, lyazj@github.com, Pavan Maddamsetti, Jacek Masiulaniec, Michael McConville, m3hm00d, miguelgvieira, Mark Morrissey, Muhammed Mourad, Harry Pan, Harry Porter, Siyuan Qian, Zhefeng Qiao, Askar Safin, Salman Shah, Huang Sha, Vikram Shenoy, Adeodato Simó, Ruslan Savchenko, Pawel Szczurko, Warren Toomey, tyfkda, tzerbib, Vanush Vaswani, Xi Wang, Zou Chang Wei, Sam Whitlock, Qiongsi Wu, LucyShawYang, ykf1114@gmail.com e Meng Zhou.
 
-We have used this text in 6.828 and 6.1810, the operating system
-classes at MIT.  We thank the faculty, teaching assistants, and
-students of those classes who have all directly or indirectly
-contributed to xv6.  In particular, we would like to thank Adam Belay,
-Austin Clements, and Nickolai Zeldovich.  Finally, we would like to
-thank people who emailed us bugs in the text or suggestions for
-improvements: Abutalib Aghayev, Sebastian Boehm, brandb97, Anton
-Burtsev, Raphael Carvalho, Tej Chajed,Brendan Davidson, Rasit
-Eskicioglu, Color Fuzzy, Wojciech Gac, Giuseppe, Tao Guo, Haibo Hao,
-Naoki Hayama, Chris Henderson, Robert Hilderman, Eden Hochbaum,
-Wolfgang Keller, Paweł Kraszewski, Henry Laih, Jin Li, Austin Liew,
-lyazj@github.com, Pavan Maddamsetti, Jacek Masiulaniec, Michael
-McConville, m3hm00d, miguelgvieira, Mark Morrissey, Muhammed Mourad,
-Harry Pan, Harry Porter, Siyuan Qian, Zhefeng Qiao, Askar Safin,
-Salman Shah, Huang Sha, Vikram Shenoy, Adeodato Simó, Ruslan
-Savchenko, Pawel Szczurko, Warren Toomey, tyfkda, tzerbib, Vanush
-Vaswani, Xi Wang, and Zou Chang Wei, Sam Whitlock, Qiongsi Wu,
-LucyShawYang, ykf1114@gmail.com, and Meng Zhou
-
-If you spot errors or have suggestions for improvement, please send email to
-Frans Kaashoek and Robert Morris (kaashoek,rtm@csail.mit.edu).
+Se você encontrar erros ou tiver sugestões de melhorias, por favor envie um e-mail para  
+Frans Kaashoek e Robert Morris (kaashoek, rtm@csail.mit.edu).
