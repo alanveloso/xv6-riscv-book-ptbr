@@ -9,13 +9,18 @@
 \chapter{Tabelas de páginas}
 \label{CH:MEM}
 
-Tabelas de páginas são o mecanismo mais popular por meio do qual o sistema operacional fornece a cada processo seu próprio espaço de endereçamento e memória privados. Tabelas de páginas determinam o que significam os endereços de memória e quais partes da memória física podem ser acessadas. Elas permitem que o xv6 isole os espaços de endereçamento de diferentes processos e os multiplexe em uma única memória física. Tabelas de páginas são um projeto popular porque fornecem um nível de indireção que permite aos sistemas operacionais realizar muitos truques. O xv6 realiza alguns truques: mapeando a mesma memória (uma página de trampolim) em vários espaços de endereçamento e protegendo pilhas de kernel e de usuário com uma página não mapeada. O restante deste capítulo explica as tabelas de páginas fornecidas pelo hardware RISC-V e como o xv6 as utiliza.
+Tabelas de páginas são o mecanismo mais popular por meio do qual o sistema operacional fornece a cada processo seu próprio espaço de endereçamento e memória privados. Tabelas de páginas determinam 
+o que significam os endereços de memória e quais partes da memória física podem ser acessadas. Elas permitem que o xv6 isole os espaços de endereçamento de diferentes processos e os multiplexe em 
+uma única memória física. Tabelas de páginas são um projeto popular porque fornecem um nível de indireção que permite aos sistemas operacionais realizar muitos truques. O xv6 realiza alguns 
+truques: mapeando a mesma memória (uma página de trampolim) em vários espaços de endereçamento e protegendo pilhas de kernel e de usuário com uma página não mapeada. O restante deste capítulo 
+explica as tabelas de páginas fornecidas pelo hardware RISC-V e como o xv6 as utiliza.
 
 %%
 \section{Hardware de paginação}
 %%
 
-Como lembrança, instruções RISC-V (tanto de usuário quanto de kernel) manipulam endereços virtuais. A RAM da máquina, ou memória física, é indexada com endereços físicos. O hardware de tabela de páginas do RISC-V conecta esses dois tipos de endereços, mapeando cada endereço virtual para um endereço físico.
+Como lembrança, instruções RISC-V (tanto de usuário quanto de kernel) manipulam endereços virtuais. A RAM da máquina, ou memória física, é indexada com endereços físicos. O hardware de tabela de 
+páginas do RISC-V conecta esses dois tipos de endereços, mapeando cada endereço virtual para um endereço físico.
 
 \begin{figure}[t]
 \center
@@ -24,7 +29,12 @@ Como lembrança, instruções RISC-V (tanto de usuário quanto de kernel) manipu
 \label{fig:riscv_address}
 \end{figure}
 
-O xv6 roda no RISC-V Sv39, o que significa que apenas os 39 bits inferiores de um endereço virtual de 64 bits são usados; os 25 bits superiores não são utilizados. Nessa configuração Sv39, uma tabela de páginas RISC-V é logicamente um array de $2^{27}$ (134.217.728) \indextext{entradas de tabela de páginas (PTEs)}. Cada PTE contém um número de página física (PPN) de 44 bits e alguns flags. O hardware de paginação traduz um endereço virtual usando os 27 bits superiores dos 39 bits para indexar na tabela de páginas e encontrar uma PTE, e gerando um endereço físico de 56 bits cujos 44 bits superiores vêm do PPN da PTE e cujos 12 bits inferiores são copiados do endereço virtual original. A Figura~\ref{fig:riscv_address} mostra esse processo com uma visão lógica da tabela de páginas como um array simples de PTEs (veja a Figura~\ref{fig:riscv_pagetable} para uma explicação mais completa). Uma tabela de páginas dá ao sistema operacional controle sobre traduções de endereços virtuais para físicos na granularidade de blocos alinhados de 4096 ($2^{12}$) bytes. Tal bloco é chamado de \indextext{página}.
+O xv6 roda no RISC-V Sv39, o que significa que apenas os 39 bits inferiores de um endereço virtual de 64 bits são usados; os 25 bits superiores não são utilizados. Nessa configuração Sv39, uma 
+tabela de páginas RISC-V é logicamente um array de $2^{27}$ (134.217.728) \indextext{entradas de tabela de páginas (PTEs)}. Cada PTE contém um número de página física (PPN) de 44 bits e alguns 
+flags. O hardware de paginação traduz um endereço virtual usando os 27 bits superiores dos 39 bits para indexar na tabela de páginas e encontrar uma PTE, e gerando um endereço físico de 56 bits 
+cujos 44 bits superiores vêm do PPN da PTE e cujos 12 bits inferiores são copiados do endereço virtual original. A Figura~\ref{fig:riscv_address} mostra esse processo com uma visão lógica da tabela 
+de páginas como um array simples de PTEs (veja a Figura~\ref{fig:riscv_pagetable} para uma explicação mais completa). Uma tabela de páginas dá ao sistema operacional controle sobre traduções de 
+endereços virtuais para físicos na granularidade de blocos alinhados de 4096 ($2^{12}$) bytes. Tal bloco é chamado de \indextext{página}.
 
 \begin{figure}[t]
 \center
@@ -33,7 +43,10 @@ O xv6 roda no RISC-V Sv39, o que significa que apenas os 39 bits inferiores de u
 \label{fig:riscv_pagetable}
 \end{figure}
 
-No RISC-V Sv39, os 25 bits superiores de um endereço virtual não são usados para tradução. O endereço físico também tem espaço para expansão: há espaço no formato da PTE para que o número da página física cresça mais 10 bits. Os projetistas do RISC-V escolheram esses números com base em previsões tecnológicas. $2^{39}$ bytes é 512 GB, o que deve ser espaço suficiente para aplicações rodando em computadores RISC-V. $2^{56}$ é espaço físico suficiente para o futuro próximo, acomodando muitos dispositivos de E/S e chips de RAM. Se for necessário mais, os projetistas do RISC-V definiram o Sv48 com endereços virtuais de 48 bits~\cite{riscv:priv}.
+No RISC-V Sv39, os 25 bits superiores de um endereço virtual não são usados para tradução. O endereço físico também tem espaço para expansão: há espaço no formato da PTE para que o número da página 
+física cresça mais 10 bits. Os projetistas do RISC-V escolheram esses números com base em previsões tecnológicas. $2^{39}$ bytes é 512 GB, o que deve ser espaço suficiente para aplicações rodando 
+em computadores RISC-V. $2^{56}$ é espaço físico suficiente para o futuro próximo, acomodando muitos dispositivos de E/S e chips de RAM. Se for necessário mais, os projetistas do RISC-V definiram o 
+Sv48 com endereços virtuais de 48 bits~\cite{riscv:priv}.
 
 Como mostra a Figura~\ref{fig:riscv_pagetable}, uma CPU R_
 
@@ -41,25 +54,41 @@ Como mostra a Figura~\ref{fig:riscv_pagetable}, uma CPU R_
 \section{Espaço de endereçamento do kernel}
 %%
 
-O xv6 mantém uma tabela de páginas por processo, descrevendo o espaço de endereçamento de usuário de cada processo, além de uma única tabela de páginas que descreve o espaço de endereçamento do kernel. O kernel configura o layout de seu espaço de endereçamento para ter acesso à memória física e a vários recursos de hardware em endereços virtuais previsíveis. A Figura~\ref{fig:xv6_layout} mostra como esse layout mapeia os endereços virtuais do kernel para endereços físicos. O arquivo \fileref{kernel/memlayout.h} declara as constantes para o layout de memória do kernel no xv6.
+O xv6 mantém uma tabela de páginas por processo, descrevendo o espaço de endereçamento de usuário de cada processo, além de uma única tabela de páginas que descreve o espaço de endereçamento do 
+kernel. O kernel configura o layout de seu espaço de endereçamento para ter acesso à memória física e a vários recursos de hardware em endereços virtuais previsíveis. A Figura~\ref{fig:xv6_layout} 
+mostra como esse layout mapeia os endereços virtuais do kernel para endereços físicos. O arquivo \fileref{kernel/memlayout.h} declara as constantes para o layout de memória do kernel no xv6.
 
-O QEMU simula um computador que inclui RAM (memória física) começando no endereço físico \texttt{0x80000000} e se estendendo até pelo menos \texttt{0x88000000}, que o xv6 chama de \texttt{PHYSTOP}. A simulação do QEMU também inclui dispositivos de E/S, como uma interface de disco. O QEMU expõe as interfaces dos dispositivos para o software como registradores de controle \indextext{mapeados em memória}, que ficam abaixo de \texttt{0x80000000} no espaço de endereçamento físico. O kernel pode interagir com os dispositivos lendo/escrevendo nesses endereços físicos especiais; tais leituras e escritas se comunicam com o hardware do dispositivo, e não com a RAM. O Capítulo~\ref{CH:TRAP} explica como o xv6 interage com os dispositivos.
+O QEMU simula um computador que inclui RAM (memória física) começando no endereço físico \texttt{0x80000000} e se estendendo até pelo menos \texttt{0x88000000}, que o xv6 chama de \texttt{PHYSTOP}. 
+A simulação do QEMU também inclui dispositivos de E/S, como uma interface de disco. O QEMU expõe as interfaces dos dispositivos para o software como registradores de controle \indextext{mapeados em 
+memória}, que ficam abaixo de \texttt{0x80000000} no espaço de endereçamento físico. O kernel pode interagir com os dispositivos lendo/escrevendo nesses endereços físicos especiais; tais leituras e 
+escritas se comunicam com o hardware do dispositivo, e não com a RAM. O Capítulo~\ref{CH:TRAP} explica como o xv6 interage com os dispositivos.
 
-O kernel acessa a RAM e os registradores mapeados em memória dos dispositivos usando o “mapeamento direto”; isto é, mapeando os recursos em endereços virtuais iguais ao endereço físico. Por exemplo, o próprio kernel está localizado em \lstinline{KERNBASE=0x80000000} tanto no espaço de endereçamento virtual quanto na memória física. O mapeamento direto simplifica o código do kernel que lê ou escreve memória física. Por exemplo, quando \lstinline{fork} aloca memória de usuário para o processo filho, o alocador retorna o endereço físico dessa memória; \lstinline{fork} usa esse endereço diretamente como um endereço virtual ao copiar a memória de usuário do processo pai para o filho.
+O kernel acessa a RAM e os registradores mapeados em memória dos dispositivos usando o “mapeamento direto”; isto é, mapeando os recursos em endereços virtuais iguais ao endereço físico. Por 
+exemplo, o próprio kernel está localizado em \lstinline{KERNBASE=0x80000000} tanto no espaço de endereçamento virtual quanto na memória física. O mapeamento direto simplifica o código do kernel que 
+lê ou escreve memória física. Por exemplo, quando \lstinline{fork} aloca memória de usuário para o processo filho, o alocador retorna o endereço físico dessa memória; \lstinline{fork} usa esse 
+endereço diretamente como um endereço virtual ao copiar a memória de usuário do processo pai para o filho.
 
 Há alguns endereços virtuais do kernel que não são mapeados diretamente:
 
 \begin{itemize}
 
-\item A página trampolim. Ela é mapeada no topo do espaço de endereçamento virtual; as tabelas de páginas de usuário também possuem esse mesmo mapeamento. O Capítulo~\ref{CH:TRAP} discute o papel da página trampolim, mas aqui vemos um caso interessante de uso de tabelas de páginas: uma página física (contendo o código do trampolim) é mapeada duas vezes no espaço de endereçamento virtual do kernel — uma vez no topo do espaço de endereçamento virtual e outra vez com mapeamento direto.
+\item A página trampolim. Ela é mapeada no topo do espaço de endereçamento virtual; as tabelas de páginas de usuário também possuem esse mesmo mapeamento. O Capítulo~\ref{CH:TRAP} discute o papel 
+da página trampolim, mas aqui vemos um caso interessante de uso de tabelas de páginas: uma página física (contendo o código do trampolim) é mapeada duas vezes no espaço de endereçamento virtual do 
+kernel — uma vez no topo do espaço de endereçamento virtual e outra vez com mapeamento direto.
 
-\item As páginas de pilha do kernel. Cada processo tem sua própria pilha de kernel, que é mapeada em endereços altos, de modo que abaixo dela o xv6 pode deixar uma \indextext{página de proteção} não mapeada. A PTE da página de proteção é inválida (ou seja, \lstinline{PTE_V} não está definida), de modo que, se o kernel ultrapassar os limites da pilha de kernel, provavelmente causará uma exceção e o kernel entrará em pânico. Sem uma página de proteção, uma pilha excedente sobrescreveria outras partes da memória do kernel, resultando em funcionamento incorreto. Um travamento com pânico é preferível.
+\item As páginas de pilha do kernel. Cada processo tem sua própria pilha de kernel, que é mapeada em endereços altos, de modo que abaixo dela o xv6 pode deixar uma \indextext{página de proteção} 
+não mapeada. A PTE da página de proteção é inválida (ou seja, \lstinline{PTE_V} não está definida), de modo que, se o kernel ultrapassar os limites da pilha de kernel, provavelmente causará uma 
+exceção e o kernel entrará em pânico. Sem uma página de proteção, uma pilha excedente sobrescreveria outras partes da memória do kernel, resultando em funcionamento incorreto. Um travamento com 
+pânico é preferível.
 
 \end{itemize}
 
-Embora o kernel use suas pilhas por meio dos mapeamentos em memória alta, elas também estão acessíveis ao kernel por meio de um endereço com mapeamento direto. Um projeto alternativo poderia usar apenas o mapeamento direto, acessando as pilhas nesse endereço diretamente mapeado. No entanto, nessa configuração, fornecer páginas de proteção exigiria o desmapeamento de endereços virtuais que, de outra forma, se refeririam à memória física, o que dificultaria seu uso.
+Embora o kernel use suas pilhas por meio dos mapeamentos em memória alta, elas também estão acessíveis ao kernel por meio de um endereço com mapeamento direto. Um projeto alternativo poderia usar 
+apenas o mapeamento direto, acessando as pilhas nesse endereço diretamente mapeado. No entanto, nessa configuração, fornecer páginas de proteção exigiria o desmapeamento de endereços virtuais que, 
+de outra forma, se refeririam à memória física, o que dificultaria seu uso.
 
-O kernel mapeia as páginas do trampolim e do código do kernel com as permissões \lstinline{PTE_R} e \lstinline{PTE_X}. O kernel lê e executa instruções a partir dessas páginas. O kernel mapeia as outras páginas com as permissões \lstinline{PTE_R} e \lstinline{PTE_W}, para que possa ler e escrever a memória nessas páginas. Os mapeamentos para as páginas de proteção são inválidos.
+O kernel mapeia as páginas do trampolim e do código do kernel com as permissões \lstinline{PTE_R} e \lstinline{PTE_X}. O kernel lê e executa instruções a partir dessas páginas. O kernel mapeia as 
+outras páginas com as permissões \lstinline{PTE_R} e \lstinline{PTE_W}, para que possa ler e escrever a memória nessas páginas. Os mapeamentos para as páginas de proteção são inválidos.
 
 %% 
 \section{Código: criação de um espaço de endereçamento}
@@ -331,14 +360,17 @@ O espaço de endereçamento de um processo consiste em páginas que contêm o te
 O xv6 mapeia os dados, a pilha e o heap com as permissões \lstinline{PTE_R}, \lstinline{PTE_W} e \lstinline{PTE_U}.
 
 O uso de permissões dentro de um espaço de endereçamento de usuário é uma técnica comum para fortalecer a segurança de um processo.  
-Se o texto fosse mapeado com \lstinline{PTE_W}, então um processo poderia acidentalmente modificar seu próprio programa; por exemplo, um erro de programação pode fazer com que o programa escreva em um ponteiro nulo, modificando instruções no endereço 0, e depois continue executando, talvez causando ainda mais problemas.  
-Para detectar tais erros imediatamente, o xv6 mapeia o texto sem \lstinline{PTE_W}; se um programa tentar armazenar acidentalmente no endereço 0, o hardware se recusará a executar a operação de escrita e gerará uma falha de página (veja Seção~\ref{sec:pagefaults}).  
+Se o texto fosse mapeado com \lstinline{PTE_W}, então um processo poderia acidentalmente modificar seu próprio programa; por exemplo, um erro de programação pode fazer com que o programa escreva em 
+um ponteiro nulo, modificando instruções no endereço 0, e depois continue executando, talvez causando ainda mais problemas.  
+Para detectar tais erros imediatamente, o xv6 mapeia o texto sem \lstinline{PTE_W}; se um programa tentar armazenar acidentalmente no endereço 0, o hardware se recusará a executar a operação de 
+escrita e gerará uma falha de página (veja Seção~\ref{sec:pagefaults}).  
 O kernel então finaliza o processo e imprime uma mensagem informativa para que o desenvolvedor possa rastrear o problema.
 
 De forma similar, ao mapear dados sem \lstinline{PTE_X}, um programa de usuário não pode acidentalmente saltar para um endereço nos dados do programa e começar a executá-los.
 
 No mundo real, reforçar um processo ao definir permissões cuidadosamente também ajuda a defender contra ataques de segurança.  
-Um adversário pode fornecer entradas cuidadosamente construídas para um programa (por exemplo, um servidor Web) que desencadeiem um bug no programa, na esperança de transformar esse bug em um exploit~\cite{aleph:smashing}.  
+Um adversário pode fornecer entradas cuidadosamente construídas para um programa (por exemplo, um servidor Web) que desencadeiem um bug no programa, na esperança de transformar esse bug em um 
+exploit~\cite{aleph:smashing}.  
 Definir permissões com cuidado e outras técnicas, como a randomização do layout do espaço de endereçamento do usuário, tornam tais ataques mais difíceis.
 
 A pilha é uma única página, e é mostrada com o conteúdo inicial criado pela chamada \texttt{exec}.  
@@ -346,7 +378,8 @@ Strings contendo os argumentos da linha de comando, bem como um array de ponteir
 Logo abaixo estão os valores que permitem que um programa comece na função \lstinline{main}, como se \lstinline{main(argc}, \lstinline{argv)} tivesse acabado de ser chamada.
 
 Para detectar um estouro da pilha do usuário além da memória alocada, o xv6 coloca uma página de proteção inacessível logo abaixo da pilha, limpando o bit \lstinline{PTE_U}.  
-Se a pilha do usuário estourar e o processo tentar usar um endereço abaixo da pilha, o hardware gerará uma exceção de falha de página, pois a página de proteção é inacessível a um programa executando em modo de usuário.  
+Se a pilha do usuário estourar e o processo tentar usar um endereço abaixo da pilha, o hardware gerará uma exceção de falha de página, pois a página de proteção é inacessível a um programa 
+executando em modo de usuário.  
 Um sistema operacional real pode, em vez disso, alocar automaticamente mais memória para a pilha do usuário quando ela estourar.
 
 Quando um processo solicita mais memória de usuário ao xv6, o xv6 aumenta o heap do processo.  
@@ -359,7 +392,8 @@ o xv6 deixa o bit \lstinline{PTE_V} limpo nos PTEs não utilizados.
 Vemos aqui alguns bons exemplos de uso das tabelas de páginas.  
 Primeiro, as tabelas de páginas de diferentes processos traduzem endereços de usuário para diferentes páginas de memória física, de forma que cada processo tenha memória de usuário privada.  
 Segundo, cada processo vê sua memória como tendo endereços virtuais contíguos começando em zero, enquanto a memória física do processo pode ser não contígua.  
-Terceiro, o kernel mapeia uma página com código trampolim no topo do espaço de endereçamento do usuário (sem \lstinline{PTE_U}), assim uma única página de memória física aparece em todos os espaços de endereçamento, mas só pode ser usada pelo kernel.
+Terceiro, o kernel mapeia uma página com código trampolim no topo do espaço de endereçamento do usuário (sem \lstinline{PTE_U}), assim uma única página de memória física aparece em todos os espaços 
+de endereçamento, mas só pode ser usada pelo kernel.
 
 \begin{figure}[t]
 \center
@@ -381,7 +415,8 @@ aloca memória física com {\tt kalloc}, zera a memória alocada e adiciona PTEs
 \lineref{kernel/vm.c:/^uvmunmap/},  
 que usa {\tt walk} para encontrar os PTEs e {\tt kfree} para liberar a memória física à qual eles se referem.
 
-O xv6 usa a tabela de páginas de um processo não apenas para informar ao hardware como mapear os endereços virtuais de usuário, mas também como o único registro de quais páginas de memória física estão alocadas para aquele processo.  
+O xv6 usa a tabela de páginas de um processo não apenas para informar ao hardware como mapear os endereços virtuais de usuário, mas também como o único registro de quais páginas de memória física 
+estão alocadas para aquele processo.  
 Essa é a razão pela qual liberar memória de usuário (em {\tt uvmunmap}) exige a inspeção da tabela de páginas do usuário.
 %% 
 \section{Código: exec}
@@ -463,7 +498,8 @@ Agora \indexcode{exec} aloca e inicializa a pilha do usuário.
 Ele aloca apenas uma página de pilha.  
 \lstinline{exec} copia as strings de argumento para o topo da pilha uma por uma, registrando os ponteiros para elas em \indexcode{ustack}.  
 Coloca um ponteiro nulo no fim da lista \indexcode{argv} que será passada para \lstinline{main}.  
-Os valores de \indexcode{argc} e \lstinline{argv} são passados para \lstinline{main} através do caminho de retorno da chamada de sistema: \lstinline{argc} é passado via o valor de retorno da chamada de sistema, que vai em {\tt a0}, e \lstinline{argv} é passado através da entrada {\tt a1} do \textit{trapframe} do processo.
+Os valores de \indexcode{argc} e \lstinline{argv} são passados para \lstinline{main} através do caminho de retorno da chamada de sistema: \lstinline{argc} é passado via o valor de retorno da 
+chamada de sistema, que vai em {\tt a0}, e \lstinline{argv} é passado através da entrada {\tt a1} do \textit{trapframe} do processo.
 
 \lstinline{exec} posiciona uma página inacessível logo abaixo da página da pilha,  
 de forma que programas que tentarem usar mais de uma página causarão falha.  
@@ -501,17 +537,26 @@ o que um programa de usuário malicioso poderia explorar para contornar o isolam
 \section{Mundo real}
 %% 
 
-Como a maioria dos sistemas operacionais, o xv6 utiliza o hardware de paginação para proteção e mapeamento de memória. A maioria dos sistemas operacionais faz um uso muito mais sofisticado da paginação do que o xv6, combinando paginação e exceções de falha de página, o que discutiremos no Capítulo~\ref{CH:TRAP}.
+Como a maioria dos sistemas operacionais, o xv6 utiliza o hardware de paginação para proteção e mapeamento de memória. A maioria dos sistemas operacionais faz um uso muito mais sofisticado da 
+paginação do que o xv6, combinando paginação e exceções de falha de página, o que discutiremos no Capítulo~\ref{CH:TRAP}.
 
-O xv6 é simplificado pelo uso de um mapeamento direto entre endereços virtuais e físicos pelo kernel, e pela suposição de que há RAM física no endereço \lstinline{0x80000000}, onde o kernel espera ser carregado. Isso funciona com o QEMU, mas em hardware real acaba sendo uma má ideia; hardware real posiciona RAM e dispositivos em endereços físicos imprevisíveis, de modo que (por exemplo) pode não haver RAM em \lstinline{0x80000000}, onde o xv6 espera poder armazenar o kernel. Projetos de kernel mais robustos utilizam a tabela de páginas para transformar layouts de memória física arbitrários em layouts previsíveis de endereços virtuais do kernel.
+O xv6 é simplificado pelo uso de um mapeamento direto entre endereços virtuais e físicos pelo kernel, e pela suposição de que há RAM física no endereço \lstinline{0x80000000}, onde o kernel espera 
+ser carregado. Isso funciona com o QEMU, mas em hardware real acaba sendo uma má ideia; hardware real posiciona RAM e dispositivos em endereços físicos imprevisíveis, de modo que (por exemplo) pode 
+não haver RAM em \lstinline{0x80000000}, onde o xv6 espera poder armazenar o kernel. Projetos de kernel mais robustos utilizam a tabela de páginas para transformar layouts de memória física 
+arbitrários em layouts previsíveis de endereços virtuais do kernel.
 
 O RISC-V oferece proteção no nível dos endereços físicos, mas o xv6 não utiliza esse recurso.
 
-Em máquinas com muita memória pode fazer sentido usar o suporte do RISC-V para ``super páginas''. Páginas pequenas fazem sentido quando a memória física é limitada, pois permitem alocação e troca para o disco com granularidade fina. Por exemplo, se um programa usa apenas 8 kilobytes de memória, fornecer-lhe uma super página inteira de 4 megabytes seria um desperdício. Páginas maiores fazem sentido em máquinas com muita RAM, e podem reduzir a sobrecarga na manipulação da tabela de páginas.
+Em máquinas com muita memória pode fazer sentido usar o suporte do RISC-V para ``super páginas''. Páginas pequenas fazem sentido quando a memória física é limitada, pois permitem alocação e troca 
+para o disco com granularidade fina. Por exemplo, se um programa usa apenas 8 kilobytes de memória, fornecer-lhe uma super página inteira de 4 megabytes seria um desperdício. Páginas maiores fazem 
+sentido em máquinas com muita RAM, e podem reduzir a sobrecarga na manipulação da tabela de páginas.
 
-A ausência, no kernel do xv6, de um alocador semelhante ao {\tt malloc} que possa fornecer memória para objetos pequenos impede o uso de estruturas de dados sofisticadas que exigiriam alocação dinâmica. Um kernel mais elaborado provavelmente alocaria blocos pequenos de tamanhos variados, em vez de (como no xv6) apenas blocos de 4096 bytes; um alocador de kernel real precisaria lidar com alocações pequenas assim como com grandes.
+A ausência, no kernel do xv6, de um alocador semelhante ao {\tt malloc} que possa fornecer memória para objetos pequenos impede o uso de estruturas de dados sofisticadas que exigiriam alocação 
+dinâmica. Um kernel mais elaborado provavelmente alocaria blocos pequenos de tamanhos variados, em vez de (como no xv6) apenas blocos de 4096 bytes; um alocador de kernel real precisaria lidar com 
+alocações pequenas assim como com grandes.
 
-Alocação de memória é um tema sempre atual, sendo os problemas básicos o uso eficiente da memória limitada e a preparação para requisições futuras desconhecidas~\cite{knuth}. Hoje em dia, as pessoas se importam mais com velocidade do que com eficiência de espaço.
+Alocação de memória é um tema sempre atual, sendo os problemas básicos o uso eficiente da memória limitada e a preparação para requisições futuras desconhecidas~\cite{knuth}. Hoje em dia, as 
+pessoas se importam mais com velocidade do que com eficiência de espaço.
 
 %% 
 \section{Exercícios}
@@ -527,7 +572,10 @@ Quanto espaço o kernel alocou? O que a PTE da nova memória contém?
 
 \item Modifique o xv6 para utilizar super páginas no kernel.
 
-\item Implementações Unix de \lstinline{exec} tradicionalmente incluem um tratamento especial para scripts de shell. Se o arquivo a ser executado começar com o texto \lstinline{#!}, então a primeira linha é interpretada como sendo um programa a ser executado para interpretar o arquivo. Por exemplo, se \lstinline{exec} for chamado para executar \lstinline{myprog} \lstinline{arg1} e a primeira linha de \lstinline{myprog} for \lstinline{#!/interp}, então \lstinline{exec} executa \lstinline{/interp} com a linha de comando \lstinline{/interp} \lstinline{myprog} \lstinline{arg1}. Implemente suporte a essa convenção no xv6.
+\item Implementações Unix de \lstinline{exec} tradicionalmente incluem um tratamento especial para scripts de shell. Se o arquivo a ser executado começar com o texto \lstinline{#!}, então a 
+primeira linha é interpretada como sendo um programa a ser executado para interpretar o arquivo. Por exemplo, se \lstinline{exec} for chamado para executar \lstinline{myprog} \lstinline{arg1} e a 
+primeira linha de \lstinline{myprog} for \lstinline{#!/interp}, então \lstinline{exec} executa \lstinline{/interp} com a linha de comando \lstinline{/interp} \lstinline{myprog} \lstinline{arg1}. 
+Implemente suporte a essa convenção no xv6.
 
 \item Implemente randomização do layout do espaço de endereçamento para o kernel.
 
