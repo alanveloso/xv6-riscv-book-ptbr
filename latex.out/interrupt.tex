@@ -1,290 +1,291 @@
-%    Sidebar about panic:
-% 	panic is the kernel's last resort: the impossible has happened and the
-% 	kernel does not know how to proceed.  In xv6, panic does ...
-\chapter{Interrupts and device drivers}
+% Sidebar sobre panic:
+% panic é o último recurso do kernel: o impossível aconteceu e
+% o kernel não sabe como prosseguir. No xv6, panic faz...
+
+\chapter{Interrupções e drivers de dispositivo}
 \label{CH:INTERRUPT}
 
-A
+Um
 \indextext{driver}
-is the code in an operating system that manages a particular device:
-it configures the device hardware,
-tells the device to perform operations,
-handles the resulting interrupts,
-and interacts with processes that may be waiting
-for I/O from the device.
-Driver code can be tricky
-because a driver executes concurrently with the device that it manages.  In
-addition, the driver must understand the device's hardware interface,
-which can be complex and poorly documented.
+é o código em um sistema operacional que gerencia um determinado dispositivo:
+ele configura o hardware do dispositivo,
+instrui o dispositivo a realizar operações,
+lida com as interrupções resultantes
+e interage com processos que possam estar esperando
+por E/S do dispositivo.
+O código de drivers pode ser complicado
+porque um driver executa concorrentemente com o dispositivo que gerencia.
+Além disso, o driver deve entender a interface de hardware do dispositivo,
+que pode ser complexa e mal documentada.
 
-Devices that need attention from the operating system can usually be
-configured to generate interrupts, which are one type of trap.
-The kernel trap handling code recognizes when a device
-has raised an interrupt and calls the driver's interrupt handler;
+Dispositivos que precisam de atenção do sistema operacional geralmente podem ser
+configurados para gerar interrupções, que são um tipo de trap.
+O código de tratamento de traps do kernel reconhece quando um dispositivo
+gerou uma interrupção e chama o manipulador de interrupção do driver.
 
-Many device drivers execute code in two contexts: a \indextext{top
-half} that runs in a process's kernel thread, and a \indextext{bottom
-half} that executes at interrupt time. The top half
-is called via system calls such as {\tt read} and {\tt write} that want
-the device to perform I/O. This code may ask the hardware to start an
-operation (e.g., ask the disk to read a block); then the code waits for
-the operation to complete. Eventually the device completes the
-operation and raises an interrupt. The driver's interrupt handler,
-acting as the bottom half,
-figures out what operation has completed, wakes up a waiting
-process if appropriate, and tells the hardware to start work
-on any waiting next operation.
+Muitos drivers de dispositivo executam código em dois contextos: uma \indextext{metade superior}
+que roda na thread do kernel de um processo, e uma \indextext{metade inferior}
+que executa no momento da interrupção. A metade superior
+é chamada por meio de chamadas de sistema como {\tt read} e {\tt write}, que querem
+que o dispositivo realize operações de E/S. Esse código pode solicitar ao hardware que inicie uma
+operação (por exemplo, pedir ao disco que leia um bloco); então o código espera pela
+conclusão da operação. Eventualmente, o dispositivo conclui a
+operação e gera uma interrupção. O manipulador de interrupção do driver,
+atuando como a metade inferior,
+descobre qual operação foi concluída, acorda um processo que estava esperando,
+se for o caso, e instrui o hardware a iniciar o trabalho
+da próxima operação pendente.
 
-\section{Code: Console input}
+\section{Código: Entrada do console}
 
-The console driver \fileref{kernel/console.c}
-is a simple illustration of driver structure. The
-console driver accepts characters typed by a human, via the \indextext{UART}
-serial-port hardware attached to the RISC-V. The console driver accumulates a
-line of input at a time, processing special input characters such as
-backspace and control-u. User processes, such as the shell, use
-the {\tt read} system call to fetch lines of input from the console.
-When you type input to xv6 in QEMU, your keystrokes are delivered to
-xv6 by way of QEMU's simulated UART hardware.
+O driver de console \fileref{kernel/console.c}
+é uma ilustração simples da estrutura de um driver. O
+driver de console aceita caracteres digitados por um humano, via o hardware da porta serial \indextext{UART}
+conectado ao RISC-V. O driver de console acumula uma
+linha de entrada por vez, processando caracteres especiais como
+backspace e control-u. Processos de usuário, como o shell, usam
+a chamada de sistema {\tt read} para obter linhas de entrada do console.
+Quando você digita algo no xv6 executando no QEMU, suas teclas são entregues ao
+xv6 por meio do hardware UART simulado pelo QEMU.
 
-The UART hardware that the driver talks to is a 16550
-chip~\cite{ns16550a} emulated by QEMU. On a real computer, a 16550
-would manage an RS232 serial link connecting to a terminal or other
-computer. When running QEMU, it's connected to your keyboard and
+O hardware UART com o qual o driver interage é um chip 16550
+~\cite{ns16550a} emulado pelo QEMU. Em um computador real, um 16550
+gerenciaria um link serial RS232 conectado a um terminal ou outro
+computador. Quando executado no QEMU, ele está conectado ao seu teclado e
 display.
 
-The UART hardware appears to software as a set of \indextext{memory-mapped}
-control registers. That is, there are some physical addresses that 
-RISC-V hardware connects to the UART device, so that loads and stores
-interact with the device hardware rather than RAM.
-The memory-mapped addresses for the UART start at 0x10000000, or {\tt UART0}
-There are a handful of UART control registers, each the width
-of a byte. Their offsets from {\tt UART0} are defined in
-{\tt LSR} register contains bits that indicate whether input
-characters are waiting to be read by the software. These
-characters (if any) are available for reading from the
-{\tt RHR} register. Each time one is read, the UART hardware
-deletes it from an internal FIFO of waiting characters, and
-clears the ``ready'' bit in {\tt LSR} when the FIFO is empty.
-The UART transmit hardware is largely independent of the receive
-hardware; if software writes a byte to the {\tt THR},
-the UART transmits that byte.
+O hardware UART é exposto ao software como um conjunto de registradores de controle \indextext{mapeados em memória}.
+Ou seja, há alguns endereços físicos que
+o hardware RISC-V conecta ao dispositivo UART, de forma que operações de leitura e escrita
+interajam com o hardware do dispositivo em vez da RAM.
+Os endereços mapeados em memória para o UART começam em 0x10000000, ou {\tt UART0}.
+Há alguns poucos registradores de controle do UART, cada um com largura
+de um byte. Seus deslocamentos a partir de {\tt UART0} são definidos em constantes.
+O registrador {\tt LSR} contém bits que indicam se há caracteres de entrada
+aguardando leitura pelo software. Esses
+caracteres (se houver) podem ser lidos a partir do
+registrador {\tt RHR}. Cada vez que se lê um caractere, o hardware do UART
+o remove de uma fila interna (FIFO) de caracteres esperando,
+e limpa o bit de "pronto" em {\tt LSR} quando a FIFO estiver vazia.
+O hardware de transmissão do UART é largamente independente do hardware de recepção;
+se o software escrever um byte em {\tt THR},
+o UART transmitirá esse byte.
 
-Xv6's {\tt main} calls {\tt consoleinit}
-hardware. This code configures the UART to generate 
-a receive 
-interrupt when the UART receives each byte of input, and
-a \indextext{transmit complete} interrupt each time the
+A função {\tt main} do xv6 chama {\tt consoleinit}
+para inicializar o hardware. Esse código configura o UART para gerar
+uma interrupção de recepção cada vez que um byte de entrada for recebido,
+e uma interrupção de \indextext{transmissão completa} cada vez que a transmissão for finalizada.
 
-The xv6 shell reads from the console by way of a file descriptor
-the {\tt read} system call make their way through the kernel to {\tt
-  consoleread} waits for input to arrive (via interrupts) and be
-buffered in {\tt cons.buf}, copies the input to user space, and (after
-a whole line has arrived) returns to the user process. If the user
-hasn't typed a full line yet, any reading processes will wait in the
-{\tt sleep} call
-(Chapter~\ref{CH:SCHED} explains the details of {\tt sleep}).
+O shell do xv6 lê do console por meio de um descritor de arquivo.
+As chamadas de sistema {\tt read} percorrem o kernel até chegar em {\tt
+  consoleread}, que espera pela chegada de entrada (via interrupções) e seu
+armazenamento em {\tt cons.buf}, copia a entrada para o espaço do usuário e (após
+uma linha completa ter sido recebida) retorna ao processo de usuário. Se o usuário
+ainda não tiver digitado uma linha completa, qualquer processo leitor esperará na
+chamada {\tt sleep}
+(o Capítulo~\ref{CH:SCHED} explica os detalhes da {\tt sleep}).
 
-When the user types a character, the UART hardware asks the RISC-V
-to raise an interrupt, which activates
-xv6's trap handler.
-The trap handler calls {\tt devintr}
-which looks at the RISC-V {\tt scause} register to discover that
-the interrupt is from an external device.
-Then it asks a hardware unit called the PLIC
+Quando o usuário digita um caractere, o hardware UART instrui o RISC-V
+a gerar uma interrupção, o que ativa
+o tratador de traps do xv6.
+O tratador de traps chama {\tt devintr},
+que examina o registrador {\tt scause} do RISC-V para descobrir que
+a interrupção veio de um dispositivo externo.
+Em seguida, ele consulta uma unidade de hardware chamada PLIC
 \cite{riscv:priv}
-to tell it which device interrupted
-If it was the UART, {\tt devintr} calls {\tt uartintr}.
+para descobrir qual dispositivo gerou a interrupção.
+Se foi o UART, {\tt devintr} chama {\tt uartintr}.
 
-{\tt uartintr}
-reads any waiting input characters from the UART hardware
-and hands them to {\tt consoleintr}
-wait for characters, since future input will raise a new interrupt.
-The job of {\tt consoleintr} is to accumulate input characters in
-{\tt cons.buf} 
-until a whole line arrives.
-{\tt consoleintr} treats backspace and a few other characters
-specially.
-When a newline arrives, {\tt consoleintr} wakes up a
-waiting {\tt consoleread} (if there is one).
+A função {\tt uartintr}
+lê quaisquer caracteres de entrada aguardando no hardware UART
+e os entrega para {\tt consoleintr}.
+Ela não espera por caracteres, pois futuras entradas gerarão novas interrupções.
+A função {\tt consoleintr} acumula caracteres de entrada em
+{\tt cons.buf}
+até que uma linha inteira seja recebida.
+{\tt consoleintr} trata backspace e alguns outros caracteres
+de forma especial.
+Quando uma nova linha chega, {\tt consoleintr} acorda um
+{\tt consoleread} que esteja esperando (se houver algum).
 
-Once woken, {\tt consoleread} will observe a full line in {\tt
-  cons.buf}, copy it to user space, and return (via the system call
-machinery) to user space.
+Uma vez acordado, {\tt consoleread} verá uma linha completa em {\tt
+  cons.buf}, a copiará para o espaço do usuário e retornará (via a máquina de chamadas
+de sistema) para o espaço do usuário.
 
-\section{Code: Console output}
+\section{Código: Saída do console}
 
-A {\tt write} system call on a file descriptor connected to the console
-eventually arrives at 
-{\tt uartputc}
-The device driver maintains an output buffer ({\tt uart\_tx\_buf})
-so that writing processes do not have to wait for the UART to finish
-sending; instead, {\tt uartputc} appends each character to the buffer,
-calls {\tt uartstart} to start the device transmitting (if it isn't
-already), and returns. The only situation in which {\tt uartputc}
-waits is if the buffer is already full.
+Uma chamada de sistema {\tt write} em um descritor de arquivo conectado ao console
+eventualmente chega em
+{\tt uartputc}.
+O driver de dispositivo mantém um buffer de saída ({\tt uart\_tx\_buf})
+para que os processos que escrevem não precisem esperar que o UART termine
+de enviar; em vez disso, {\tt uartputc} adiciona cada caractere ao buffer,
+chama {\tt uartstart} para iniciar a transmissão pelo dispositivo (caso ele ainda não esteja transmitindo),
+e retorna. A única situação em que {\tt uartputc}
+espera é se o buffer já estiver cheio.
 
-Each time the UART finishes sending a byte, it generates an interrupt.
-{\tt uartintr} calls {\tt uartstart}, which checks that the device
-really has finished sending, and hands the device the next buffered
-output character. Thus if a process writes multiple bytes to the
-console, typically the first byte will be sent by {\tt uartputc}'s
-call to {\tt uartstart}, and the remaining buffered bytes will be sent
-by {\tt uartstart} calls from {\tt uartintr} as transmit complete
-interrupts arrive.
+Cada vez que o UART termina de enviar um byte, ele gera uma interrupção.
+{\tt uartintr} chama {\tt uartstart}, que verifica se o dispositivo
+realmente terminou de enviar e fornece ao dispositivo o próximo caractere
+de saída no buffer. Assim, se um processo escreve múltiplos bytes no
+console, normalmente o primeiro byte será enviado pela chamada de
+{\tt uartstart} dentro de {\tt uartputc}, e os bytes restantes no buffer serão enviados
+por chamadas a {\tt uartstart} feitas por {\tt uartintr} à medida que as
+interrupções de transmissão completa chegam.
 
-A general pattern to note is the decoupling of device activity from
-process activity via buffering and interrupts. The console driver can
-process input even when no process is waiting to read it; a subsequent
-read will see the input. Similarly, processes can send output without
-having to wait for the device. This decoupling can increase
-performance by allowing processes to execute concurrently with device
-I/O, and is particularly important when the device is slow (as with
-the UART) or needs immediate attention (as with echoing typed
-characters). This idea is sometimes called \indextext{I/O
-  concurrency}.
+Um padrão geral a ser notado é o desacoplamento entre a atividade do dispositivo
+e a atividade dos processos, feito por meio de buffers e interrupções. O driver
+de console pode processar entrada mesmo quando nenhum processo está esperando
+para lê-la; uma leitura subsequente verá a entrada. Da mesma forma, processos
+podem enviar saída sem precisar esperar pelo dispositivo. Esse desacoplamento
+pode melhorar o desempenho, permitindo que processos sejam executados
+concorrentemente com a E/S de dispositivos, e é particularmente importante
+quando o dispositivo é lento (como o UART) ou requer atenção imediata
+(como ao exibir caracteres digitados). Essa ideia às vezes é chamada de
+\indextext{concorrência de E/S}.
 
-\section{Concurrency in drivers}
+\section{Concorrência em drivers}
 
-You may have noticed calls to {\tt acquire} in {\tt consoleread}
-and in {\tt consoleintr}. These calls acquire a lock, which protects
-the console driver's data structures from concurrent access.
-There are three concurrency dangers here: two processes on
-different CPUs might call {\tt consoleread} at the same time;
-the hardware might ask a CPU to deliver a console (really 
-UART) interrupt while that CPU is already executing inside
+Você pode ter notado chamadas a {\tt acquire} em {\tt consoleread}
+e em {\tt consoleintr}. Essas chamadas adquirem um lock, que protege
+as estruturas de dados do driver de console contra acesso concorrente.
+Há três perigos de concorrência aqui: dois processos em
+CPUs diferentes podem chamar {\tt consoleread} ao mesmo tempo;
+o hardware pode solicitar a uma CPU que entregue uma interrupção de console (na verdade
+do UART) enquanto essa CPU já está executando dentro de
 {\tt consoleread};
-and the hardware might deliver a console interrupt on
-a different CPU while {\tt consoleread} is executing.
-Chapter~\ref{CH:LOCK} explains how to use locks
-to ensure that these dangers don't lead to incorrect results.
+e o hardware pode entregar uma interrupção de console em
+uma CPU diferente enquanto {\tt consoleread} está em execução.
+O Capítulo~\ref{CH:LOCK} explica como usar locks
+para garantir que esses perigos não resultem em comportamentos incorretos.
 
-Another way in which concurrency requires care in drivers is that one
-process may be waiting for input from a device, but the interrupt
-signaling arrival of the input may arrive when a different process (or
-no process at all) is running. Thus interrupt handlers are not allowed
-to think about the process or code that they have interrupted. For
-example, an interrupt handler cannot safely call {\tt copyout} with
-the current process's page table. Interrupt handlers typically do
-relatively little work (e.g., just copy the input data to a buffer),
-and wake up top-half code to do the rest.
+Outra forma em que a concorrência exige cuidado em drivers é que um
+processo pode estar esperando por entrada de um dispositivo, mas a interrupção
+que sinaliza a chegada dessa entrada pode ocorrer quando outro processo (ou
+nenhum processo) está em execução. Portanto, manipuladores de interrupção não devem
+presumir nada sobre o processo ou código que interromperam. Por
+exemplo, um manipulador de interrupção não pode chamar com segurança {\tt copyout}
+com a tabela de páginas do processo atual. Manipuladores de interrupção
+tipicamente fazem apenas um trabalho mínimo (por exemplo, apenas copiar os dados
+de entrada para um buffer) e acordam o código da metade superior para
+fazer o restante.
 
-\section{Timer interrupts}
+\section{Interrupções de temporizador}
 
-Xv6 uses timer interrupts to maintain its idea of the
-current time and to switch among compute-bound processes. Timer
-interrupts come from clock hardware attached to each RISC-V CPU. Xv6
-programs each CPU's clock hardware to interrupt the CPU periodically.
+O xv6 usa interrupções de temporizador para manter sua noção do
+tempo atual e para alternar entre processos que utilizam intensamente a CPU.
+As interrupções de temporizador vêm de um hardware de clock conectado a cada CPU RISC-V.
+O xv6 programa o hardware de clock de cada CPU para interromper periodicamente.
 
-Code in {\tt start.c} 
-that allow supervisor-mode access to the timer control
-registers, and then asks for the first timer interrupt.
-The {\tt time} control register contains a count that the
-hardware increments at a steady rate; this serves as a
-notion of the current time. The {\tt stimecmp} register
-contains a time at which the the CPU will raise a timer
-interrupt; setting {\tt stimecmp} to the current value
-of {\tt time} plus {\it x} will schedule an interrupt
-{\it x} time units in the future. For {\tt qemu}'s RISC-V
-emulation, 1000000 time units is roughly a tenth of second.
+O código em {\tt start.c}
+permite o acesso em modo supervisor aos registradores de controle do temporizador,
+e então solicita a primeira interrupção de temporizador.
+O registrador de controle {\tt time} contém um contador que o
+hardware incrementa a uma taxa constante; isso serve como uma
+noção de tempo atual. O registrador {\tt stimecmp}
+contém o tempo no qual a CPU deve gerar uma interrupção de temporizador;
+definir {\tt stimecmp} para o valor atual de {\tt time} mais {\it x}
+agendará uma interrupção para {\it x} unidades de tempo no futuro.
+Para a emulação RISC-V do {\tt qemu}, 1000000 unidades de tempo equivalem
+a aproximadamente um décimo de segundo.
 
-Timer interrupts arrive via {\tt usertrap} or {\tt kerneltrap}
-and {\tt devintr}, like other device interrupts.
-Timer interrupts arrive with {\tt scause}'s low bits set to
-five; {\tt devintr} in {\tt trap.c} detects this situation
-and calls {\tt clockintr}
-The latter function increments {\tt ticks},
-allowing the kernel to track the
-passage of time. The increment occurs on only one CPU, to avoid time
-passing faster if there are multiple CPUs.
-{\tt clockintr} wakes up any processes waiting in the {\tt sleep}
-system call,
-and schedules the next timer interrupt by writing
+As interrupções de temporizador chegam por meio de {\tt usertrap} ou {\tt kerneltrap}
+e {\tt devintr}, como outras interrupções de dispositivo.
+Interrupções de temporizador chegam com os bits baixos do {\tt scause}
+configurados como cinco; {\tt devintr} em {\tt trap.c} detecta essa situação
+e chama {\tt clockintr}.
+Essa última função incrementa {\tt ticks},
+permitindo que o kernel acompanhe a
+passagem do tempo. O incremento ocorre em apenas uma CPU, para evitar que o tempo
+avance mais rápido se houver múltiplas CPUs.
+{\tt clockintr} acorda qualquer processo que esteja esperando na chamada de sistema {\tt sleep},
+e agenda a próxima interrupção de temporizador escrevendo em
 {\tt stimecmp}.
 
-{\tt devintr} returns 2 for a timer interrupt
-in order to indicate to {\tt kerneltrap}
-or {\tt usertrap} that they should call {\tt yield} so that
-CPUs can be multiplexed among runnable processes.
+{\tt devintr} retorna 2 para uma interrupção de temporizador
+com o objetivo de indicar a {\tt kerneltrap}
+ou {\tt usertrap} que devem chamar {\tt yield}, de forma que
+as CPUs possam ser multiplexadas entre processos prontos para executar.
 
-The fact that kernel code can be interrupted by a timer interrupt that
-forces a context switch via {\tt yield} is part of the reason why
-early code in {\tt usertrap} is careful to save state such as {\tt
-  sepc} before enabling interrupts. These context switches also mean
-that kernel code must be written in the knowledge that it may move
-from one CPU to another without warning.
+O fato de que código do kernel pode ser interrompido por uma interrupção de temporizador que
+força uma troca de contexto via {\tt yield} é parte da razão pela qual
+o código inicial em {\tt usertrap} é cuidadoso ao salvar o estado, como {\tt
+  sepc}, antes de habilitar interrupções. Essas trocas de contexto também significam
+que o código do kernel deve ser escrito com a consciência de que ele pode ser movido
+de uma CPU para outra sem aviso prévio.
 
-\section{Real world}
+\section{Mundo real}
 
-Xv6, like many operating systems, allows interrupts and even context
-switches (via {\tt yield}) while executing in the kernel. The reason
-for this is to retain quick response times during complex system calls
-that run for a long time. However, as noted above, allowing interrupts
-in the kernel is the source of some complexity; as a result, a few
-operating systems allow interrupts only while executing user code.
+O xv6, como muitos sistemas operacionais, permite interrupções e até trocas de contexto
+(via {\tt yield}) enquanto executa no kernel. A razão para isso é manter tempos
+de resposta rápidos durante chamadas de sistema complexas que executam por muito tempo.
+No entanto, como mencionado acima, permitir interrupções no kernel é a fonte de
+alguma complexidade; como resultado, alguns sistemas operacionais permitem
+interrupções apenas durante a execução de código em modo usuário.
 
-Supporting all the devices on a typical computer in its full glory is
-much work, because there are many devices, the devices have many
-features, and the protocol between device and driver can be complex
-and poorly documented. In many operating systems, the drivers account
-for more code than the core kernel.
+Dar suporte a todos os dispositivos de um computador típico em toda sua complexidade
+é muito trabalho, pois há muitos dispositivos, os dispositivos têm muitos
+recursos, e o protocolo entre o dispositivo e o driver pode ser complexo
+e mal documentado. Em muitos sistemas operacionais, os drivers representam
+mais código do que o próprio núcleo do kernel.
 
-The UART driver retrieves data a byte at a time by reading the UART
-control registers; this pattern is called \indextext{programmed I/O}, since
-software is driving the data movement. Programmed I/O is simple, but
-too slow to be used at high data rates. Devices that need to move lots
-of data at high speed typically use \indextext{direct memory access (DMA)}.
-DMA device hardware directly writes incoming data to RAM, and reads
-outgoing data from RAM. Modern disk and network devices use DMA. A
-driver for a DMA device would prepare data in RAM, and then use a
-single write to a control register to tell the device to process the
-prepared data.
+O driver de UART recupera dados um byte por vez lendo os registradores de controle do UART;
+esse padrão é chamado de \indextext{E/S programada}, já que
+o software é quem controla a movimentação dos dados. A E/S programada é simples,
+mas lenta demais para ser usada em altas taxas de dados. Dispositivos que precisam
+mover grandes quantidades de dados em alta velocidade geralmente usam
+\indextext{acesso direto à memória (DMA)}.
+O hardware do dispositivo DMA grava diretamente os dados recebidos na RAM e lê
+os dados a serem enviados diretamente da RAM. Discos e dispositivos de rede modernos usam DMA.
+Um driver para um dispositivo DMA prepara os dados na RAM e, então, usa uma única
+escrita em um registrador de controle para instruir o dispositivo a processar os dados preparados.
 
-Interrupts make sense when a device needs attention at unpredictable
-times, and not too often. But interrupts have high CPU overhead. Thus
-high speed devices, such as network and disk controllers, use tricks
-that reduce the need for interrupts. One trick is to raise a single
-interrupt for a whole batch of incoming or outgoing requests. Another
-trick is for the driver to disable interrupts entirely, and to check
-the device periodically to see if it needs attention. This technique
-is called \indextext{polling}. Polling makes sense if the device performs
-operations at a high rate, but it wastes CPU time if the device is mostly
-idle. Some drivers dynamically switch between polling and interrupts
-depending on the current device load.
+Interrupções fazem sentido quando um dispositivo precisa de atenção em momentos
+imprevisíveis e não com muita frequência. No entanto, interrupções possuem alto custo
+de CPU. Assim, dispositivos de alta velocidade, como controladoras de disco e rede,
+usam técnicas para reduzir a necessidade de interrupções. Uma técnica é gerar
+uma única interrupção para um lote inteiro de requisições de entrada ou saída.
+Outra técnica é o driver desabilitar completamente as interrupções e verificar
+periodicamente se o dispositivo precisa de atenção. Essa técnica
+é chamada de \indextext{polling}. Polling faz sentido se o dispositivo opera
+a uma taxa alta, mas desperdiça tempo de CPU se o dispositivo estiver
+na maior parte do tempo ocioso. Alguns drivers alternam dinamicamente entre
+polling e interrupções dependendo da carga atual do dispositivo.
 
-The UART driver copies incoming data first to a buffer in the kernel,
-and then to user space. This makes sense at low data rates, but such a
-double copy can significantly reduce performance for devices that
-generate or consume data very quickly. Some operating systems are able
-to directly move data between user-space buffers and device hardware,
-often with DMA.
+O driver de UART copia os dados recebidos primeiro para um buffer no kernel
+e depois para o espaço do usuário. Isso faz sentido em baixas taxas de dados,
+mas essa cópia dupla pode reduzir significativamente o desempenho para dispositivos
+que geram ou consomem dados muito rapidamente. Alguns sistemas operacionais
+conseguem mover dados diretamente entre buffers em espaço de usuário e o
+hardware do dispositivo, frequentemente com DMA.
 
-As mentioned in Chapter~\ref{CH:UNIX}, the console appears to
-applications as a regular file, and applications read input and write
-output using the \lstinline{read} and \lstinline{write} system calls.
-Applications may want to control aspects of a device that cannot be
-expressed through the standard file system calls (e.g.,
-enabling/disabling line buffering in the console driver).  Unix
-operating systems support the \lstinline{ioctl} system call for such
-cases.
+Como mencionado no Capítulo~\ref{CH:UNIX}, o console aparece para
+as aplicações como um arquivo comum, e aplicações leem entrada e escrevem
+saída usando as chamadas de sistema \lstinline{read} e \lstinline{write}.
+Aplicações podem querer controlar aspectos de um dispositivo que não podem ser
+expressos pelas chamadas padrão do sistema de arquivos (por exemplo,
+ativar/desativar o buffer de linha no driver de console).
+Sistemas Unix oferecem a chamada de sistema \lstinline{ioctl} para esses
+casos.
 
-Some usages of computers require that the system must respond in a
-bounded time.  For example, in safety-critical systems missing a
-deadline can lead to disasters.  Xv6 is not suitable for hard
-real-time settings. Operating systems for hard real-time tend to be
-libraries that link with the application in a way that allows for an
-analysis to determine the worst-case response time.  Xv6 is also not
-suitable for soft real-time applications, when missing a deadline
-occasionally is acceptable, because xv6's scheduler is too simplistic and it has
-kernel code path where interrupts are disabled for a long time.
+Alguns usos de computadores exigem que o sistema responda em um
+tempo limitado. Por exemplo, em sistemas críticos para segurança, perder um
+prazo pode levar a desastres. O xv6 não é adequado para ambientes
+de tempo real rígido. Sistemas operacionais para tempo real rígido tendem a ser
+bibliotecas que se ligam à aplicação de forma que permita uma
+análise para determinar o pior caso de tempo de resposta.
+O xv6 também não é adequado para aplicações de tempo real suave,
+quando ocasionalmente perder um prazo é aceitável, pois o escalonador do xv6
+é muito simplista e há caminhos de código no kernel em que as interrupções
+ficam desabilitadas por muito tempo.
 
-\section{Exercises}
+\section{Exercícios}
 
 \begin{enumerate}
 
-\item Modify {\tt uart.c} to not use interrupts at all. You may need
-to modify {\tt console.c} as well.
+\item Modifique {\tt uart.c} para não usar interrupções. Pode ser necessário
+modificar {\tt console.c} também.
 
-\item Add a driver for an Ethernet card.
+\item Adicione um driver para uma placa Ethernet.
 
 \end{enumerate}
