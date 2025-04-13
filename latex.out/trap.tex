@@ -623,9 +623,12 @@ usando instruções de carregamento e armazenamento.
 
 \section{Mundo real}
 
-O trampolim e o trapframe podem parecer excessivamente complexos. Uma força motriz é que o RISC-V intencionalmente faz o mínimo possível ao forçar uma trap, para permitir a possibilidade de um tratamento de trap muito rápido, o que se mostra importante. Como resultado, as primeiras instruções do manipulador de trap do núcleo efetivamente têm que ser executadas no ambiente do usuário: a tabela de páginas do usuário e o conteúdo dos registradores do usuário.
+O trampolim e o trapframe podem parecer excessivamente complexos. Uma força motriz é que o RISC-V intencionalmente faz o mínimo possível ao forçar uma trap, para permitir a possibilidade de um 
+tratamento de trap muito rápido, o que se mostra importante. Como resultado, as primeiras instruções do manipulador de trap do núcleo efetivamente têm que ser executadas no ambiente do usuário: a 
+tabela de páginas do usuário e o conteúdo dos registradores do usuário.
 E o manipulador de trap inicialmente ignora fatos úteis, como a
-identidade do processo que está em execução ou o endereço da tabela de páginas do núcleo. Uma solução é possível porque o RISC-V fornece lugares protegidos nos quais o núcleo pode armazenar informações antes de entrar no espaço do usuário: o registrador {\tt sscratch}, e entradas de tabela de páginas do usuário
+identidade do processo que está em execução ou o endereço da tabela de páginas do núcleo. Uma solução é possível porque o RISC-V fornece lugares protegidos nos quais o núcleo pode armazenar 
+informações antes de entrar no espaço do usuário: o registrador {\tt sscratch}, e entradas de tabela de páginas do usuário
 que apontam para a memória do núcleo, mas são protegidas pela falta de \lstinline{PTE_U}.
 O trampolim e o trapframe do Xv6 exploram esses recursos do RISC-V.
 
@@ -633,7 +636,8 @@ A necessidade de páginas de trampolim especiais poderia ser eliminada se a mem�
 fosse mapeada na tabela de páginas do usuário de cada processo (com
 \lstinline{PTE_U} apagado).
 Isso também eliminaria a necessidade de uma troca de tabela de páginas ao fazer uma trap do
-espaço do usuário para o núcleo. Isso, por sua vez, permitiria que implementações de chamadas de sistema no núcleo aproveitassem a memória do usuário do processo atual sendo mapeada, permitindo que o código do núcleo desreferencie diretamente ponteiros do usuário. Muitos sistemas operacionais usaram essas ideias para
+espaço do usuário para o núcleo. Isso, por sua vez, permitiria que implementações de chamadas de sistema no núcleo aproveitassem a memória do usuário do processo atual sendo mapeada, permitindo que 
+o código do núcleo desreferencie diretamente ponteiros do usuário. Muitos sistemas operacionais usaram essas ideias para
 aumentar a eficiência. O Xv6 as evita para reduzir as chances de
 erros de segurança no núcleo devido ao uso inadvertido de ponteiros do usuário,
 e para reduzir alguma complexidade que seria necessária para garantir que
@@ -656,7 +660,8 @@ planeja usar sua memória (veja {\tt madvise}).
 
 \begin{enumerate}
 
-\item As funções {\tt copyin} e {\tt copyinstr} percorrem a tabela de páginas do usuário em software. Configure a tabela de páginas do núcleo para que o núcleo tenha o programa do usuário mapeado, e {\tt copyin} e {\tt
+\item As funções {\tt copyin} e {\tt copyinstr} percorrem a tabela de páginas do usuário em software. Configure a tabela de páginas do núcleo para que o núcleo tenha o programa do usuário mapeado, 
+e {\tt copyin} e {\tt
     copyinstr} possam usar {\tt memcpy} para copiar argumentos de chamadas de sistema para o espaço do núcleo, confiando no hardware para percorrer a tabela de páginas.
 
 \item Implemente alocação de memória preguiçosa.
