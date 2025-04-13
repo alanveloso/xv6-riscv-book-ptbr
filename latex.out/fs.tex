@@ -327,41 +327,63 @@ fazendo a varredura para trás
 %% 
 \section{Camada de logging}
 
-Um dos problemas mais interessantes no design de sistemas de arquivos é a recuperação após falhas. O problema surge porque muitas operações do sistema de arquivos envolvem múltiplas gravações no disco, e uma falha após apenas parte dessas gravações pode deixar o sistema de arquivos em disco em um estado inconsistente. Por exemplo, suponha que ocorra uma falha durante o truncamento de um arquivo (definindo seu tamanho como zero e liberando seus blocos de conteúdo). Dependendo da ordem das gravações no disco, a falha pode deixar um inode com uma referência a um bloco de conteúdo que está marcado como livre, ou pode deixar um bloco alocado, porém não referenciado.
+Um dos problemas mais interessantes no design de sistemas de arquivos é a recuperação após falhas. O problema surge porque muitas operações do sistema de arquivos envolvem múltiplas gravações no 
+disco, e uma falha após apenas parte dessas gravações pode deixar o sistema de arquivos em disco em um estado inconsistente. Por exemplo, suponha que ocorra uma falha durante o truncamento de um 
+arquivo (definindo seu tamanho como zero e liberando seus blocos de conteúdo). Dependendo da ordem das gravações no disco, a falha pode deixar um inode com uma referência a um bloco de conteúdo 
+que está marcado como livre, ou pode deixar um bloco alocado, porém não referenciado.
 
-O segundo caso é relativamente inofensivo, mas um inode que referencia um bloco já liberado pode causar sérios problemas após um reboot. Após reiniciar, o kernel pode alocar esse bloco para outro arquivo, e agora temos dois arquivos diferentes apontando, inadvertidamente, para o mesmo bloco. Se o xv6 suportasse múltiplos usuários, isso poderia ser um problema de segurança, já que o dono do arquivo antigo poderia ler e escrever nos blocos do novo arquivo, pertencente a outro usuário.
+O segundo caso é relativamente inofensivo, mas um inode que referencia um bloco já liberado pode causar sérios problemas após um reboot. Após reiniciar, o kernel pode alocar esse bloco para outro 
+arquivo, e agora temos dois arquivos diferentes apontando, inadvertidamente, para o mesmo bloco. Se o xv6 suportasse múltiplos usuários, isso poderia ser um problema de segurança, já que o dono do 
+arquivo antigo poderia ler e escrever nos blocos do novo arquivo, pertencente a outro usuário.
 
-O xv6 resolve o problema de falhas durante operações no sistema de arquivos com uma forma simples de logging. Uma chamada de sistema no xv6 não grava diretamente nas estruturas de dados do sistema de arquivos no disco. Em vez disso, ela grava uma descrição de todas as operações de escrita que deseja realizar em um 
+O xv6 resolve o problema de falhas durante operações no sistema de arquivos com uma forma simples de logging. Uma chamada de sistema no xv6 não grava diretamente nas estruturas de dados do sistema 
+de arquivos no disco. Em vez disso, ela grava uma descrição de todas as operações de escrita que deseja realizar em um 
 \indextext{log} 
 no disco. Uma vez que a chamada de sistema tenha registrado todas as suas gravações, ela grava um registro especial de 
 \indextext{commit}
-no disco, indicando que o log contém uma operação completa. Nesse ponto, a chamada de sistema copia as gravações para as estruturas de dados reais no disco. Após essas gravações serem concluídas, o log é apagado do disco.
+no disco, indicando que o log contém uma operação completa. Nesse ponto, a chamada de sistema copia as gravações para as estruturas de dados reais no disco. Após essas gravações serem concluídas, 
+o log é apagado do disco.
 
-Se o sistema falhar e reiniciar, o código do sistema de arquivos realiza a recuperação da seguinte forma, antes de executar qualquer processo. Se o log estiver marcado como contendo uma operação completa, então o código de recuperação copia as gravações para seus devidos locais no sistema de arquivos. Se o log não estiver marcado como completo, o código de recuperação simplesmente o ignora. A recuperação finaliza apagando o log.
+Se o sistema falhar e reiniciar, o código do sistema de arquivos realiza a recuperação da seguinte forma, antes de executar qualquer processo. Se o log estiver marcado como contendo uma operação 
+completa, então o código de recuperação copia as gravações para seus devidos locais no sistema de arquivos. Se o log não estiver marcado como completo, o código de recuperação simplesmente o 
+ignora. A recuperação finaliza apagando o log.
 
-Por que o log do xv6 resolve o problema de falhas durante operações no sistema de arquivos? Se a falha ocorrer antes do commit, o log não estará marcado como completo, o código de recuperação o ignorará, e o estado do disco será como se a operação nunca tivesse iniciado. Se a falha ocorrer após o commit, então a recuperação irá repetir todas as gravações da operação, talvez reescrevendo blocos já parcialmente atualizados. Em ambos os casos, o log torna as operações atômicas em relação a falhas: após a recuperação, ou todas as gravações da operação estão no disco, ou nenhuma está.
+Por que o log do xv6 resolve o problema de falhas durante operações no sistema de arquivos? Se a falha ocorrer antes do commit, o log não estará marcado como completo, o código de recuperação o 
+ignorará, e o estado do disco será como se a operação nunca tivesse iniciado. Se a falha ocorrer após o commit, então a recuperação irá repetir todas as gravações da operação, talvez reescrevendo 
+blocos já parcialmente atualizados. Em ambos os casos, o log torna as operações atômicas em relação a falhas: após a recuperação, ou todas as gravações da operação estão no disco, ou nenhuma está.
 %% 
 %% 
 %% 
 \section{Design do log}
 
-O log reside em um local fixo e conhecido, especificado no superbloco. Ele consiste em um bloco de cabeçalho seguido por uma sequência de cópias de blocos atualizados (``blocos logados''). O bloco de cabeçalho contém um array com números de setores, um para cada bloco logado, e a contagem de blocos no log. A contagem no bloco de cabeçalho no disco é zero, indicando que não há transação no log, ou diferente de zero, indicando que o log contém uma transação completa e confirmada com a quantidade indicada de blocos. O xv6 grava o bloco de cabeçalho quando uma transação é confirmada, mas não antes disso, e define a contagem como zero após copiar os blocos para o sistema de arquivos. Assim, uma falha no meio de uma transação resultará em uma contagem zero no cabeçalho; uma falha após o commit resultará em uma contagem diferente de zero.
+O log reside em um local fixo e conhecido, especificado no superbloco. Ele consiste em um bloco de cabeçalho seguido por uma sequência de cópias de blocos atualizados (``blocos logados''). O bloco 
+de cabeçalho contém um array com números de setores, um para cada bloco logado, e a contagem de blocos no log. A contagem no bloco de cabeçalho no disco é zero, indicando que não há transação no 
+log, ou diferente de zero, indicando que o log contém uma transação completa e confirmada com a quantidade indicada de blocos. O xv6 grava o bloco de cabeçalho quando uma transação é confirmada, 
+mas não antes disso, e define a contagem como zero após copiar os blocos para o sistema de arquivos. Assim, uma falha no meio de uma transação resultará em uma contagem zero no cabeçalho; uma 
+falha após o commit resultará em uma contagem diferente de zero.
 
-O código de cada chamada de sistema indica o início e fim da sequência de gravações que devem ser atômicas em relação a falhas. Para permitir a execução concorrente de chamadas de sistema por diferentes processos, o sistema de logging pode acumular gravações de múltiplas chamadas em uma única transação. Assim, um único commit pode envolver as gravações de várias chamadas de sistema completas. Para evitar que uma chamada de sistema seja dividida entre transações, o sistema de logging apenas faz commit quando não há chamadas de sistema de arquivos em andamento.
+O código de cada chamada de sistema indica o início e fim da sequência de gravações que devem ser atômicas em relação a falhas. Para permitir a execução concorrente de chamadas de sistema por 
+diferentes processos, o sistema de logging pode acumular gravações de múltiplas chamadas em uma única transação. Assim, um único commit pode envolver as gravações de várias chamadas de sistema 
+completas. Para evitar que uma chamada de sistema seja dividida entre transações, o sistema de logging apenas faz commit quando não há chamadas de sistema de arquivos em andamento.
 
 A ideia de agrupar várias transações em um único commit é chamada de 
 \indextext{group commit}.
-Group commit reduz o número de operações no disco porque amortiza o custo fixo de um commit entre várias operações. Ele também entrega múltiplas gravações concorrentes ao sistema de disco ao mesmo tempo, possivelmente permitindo que o disco as grave todas em uma única rotação. O driver virtio do xv6 não suporta esse tipo de 
+Group commit reduz o número de operações no disco porque amortiza o custo fixo de um commit entre várias operações. Ele também entrega múltiplas gravações concorrentes ao sistema de disco ao mesmo 
+tempo, possivelmente permitindo que o disco as grave todas em uma única rotação. O driver virtio do xv6 não suporta esse tipo de 
 \indextext{batching},
 mas o design do sistema de arquivos do xv6 o permite.
 
-O xv6 dedica uma quantidade fixa de espaço no disco para armazenar o log. O número total de blocos gravados pelas chamadas de sistema em uma transação deve caber nesse espaço. Isso tem duas consequências. Nenhuma chamada de sistema pode gravar mais blocos distintos do que o espaço disponível no log. Isso não é problema para a maioria das chamadas, mas duas delas podem gravar muitos blocos:
+O xv6 dedica uma quantidade fixa de espaço no disco para armazenar o log. O número total de blocos gravados pelas chamadas de sistema em uma transação deve caber nesse espaço. Isso tem duas 
+consequências. Nenhuma chamada de sistema pode gravar mais blocos distintos do que o espaço disponível no log. Isso não é problema para a maioria das chamadas, mas duas delas podem gravar muitos 
+blocos:
 \indexcode{write}
 e
 \indexcode{unlink}.
-Uma gravação de arquivo grande pode gravar muitos blocos de dados, vários blocos de mapa de bits e um bloco de inode; remover um arquivo grande pode gravar vários blocos de mapa de bits e um inode. A chamada de sistema \lstinline{write} do xv6 divide grandes gravações em várias menores que cabem no log, e 
+Uma gravação de arquivo grande pode gravar muitos blocos de dados, vários blocos de mapa de bits e um bloco de inode; remover um arquivo grande pode gravar vários blocos de mapa de bits e um 
+inode. A chamada de sistema \lstinline{write} do xv6 divide grandes gravações em várias menores que cabem no log, e 
 \lstinline{unlink}
-não causa problemas porque na prática o sistema de arquivos do xv6 usa apenas um bloco de mapa de bits. A outra consequência do espaço limitado é que o sistema de logging não permite o início de uma nova chamada de sistema a menos que tenha certeza de que suas gravações caberão no espaço restante do log.
+não causa problemas porque na prática o sistema de arquivos do xv6 usa apenas um bloco de mapa de bits. A outra consequência do espaço limitado é que o sistema de logging não permite o início de 
+uma nova chamada de sistema a menos que tenha certeza de que suas gravações caberão no espaço restante do log.
 %% 
 %% 
 %% 
@@ -407,7 +429,8 @@ e outras leituras dentro da mesma transação devem ver as modificações.
 detecta quando um bloco é gravado várias vezes durante uma única transação, e aloca para ele o mesmo slot no log.
 Essa otimização é comumente chamada de 
 \indextext{absorção}.
-É comum, por exemplo, que o bloco de disco contendo inodes de vários arquivos seja gravado diversas vezes dentro de uma transação. Absorvendo várias gravações em disco em uma só, o sistema de arquivos economiza espaço no log e melhora o desempenho, pois apenas uma cópia do bloco precisa ser gravada.
+É comum, por exemplo, que o bloco de disco contendo inodes de vários arquivos seja gravado diversas vezes dentro de uma transação. Absorvendo várias gravações em disco em uma só, o sistema de 
+arquivos economiza espaço no log e melhora o desempenho, pois apenas uma cópia do bloco precisa ser gravada.
 
 \indexcode{end_op}
 \lineref{kernel/log.c:/^end.op/}
