@@ -1,483 +1,424 @@
-% cox and mullender, semaphores.
-% 
-% process has one thread with two stacks
-%  
-% pike et al, sleep and wakeup
-\chapter{Scheduling}
+% cox e mullender, semáforos.
+%
+% processo tem um thread com duas pilhas
+%
+% pike et al, dormir e acordar
+\chapter{Escalonamento}
 \label{CH:SCHED}
 
-Any operating system is likely to run with more processes than the
-computer has CPUs, so a plan is needed to time-share the
-CPUs among the processes. Ideally the sharing would be transparent to user
-processes.  A common approach is to provide each process
-with the illusion that it has its own virtual CPU by
-\indextext{multiplexing}
-the processes onto the hardware CPUs.
-This chapter explains how xv6 achieves this multiplexing.
-%% 
-\section{Multiplexing}
-%% 
+Qualquer sistema operacional provavelmente executará mais processos do que
+o computador possui CPUs, então um plano é necessário para compartilhar o tempo
+das CPUs entre os processos. Idealmente, o compartilhamento seria transparente para os processos do usuário. Uma abordagem comum é fornecer a cada processo
+a ilusão de que tem sua própria CPU virtual por meio do
+\indextext{multiplexação}
+dos processos nas CPUs de hardware. Este capítulo explica como o xv6
+alcança essa multiplexação.
 
-Xv6 multiplexes by switching each CPU from one process to
-another in two situations. First, xv6's
-\lstinline{sleep}
-and
-\lstinline{wakeup}
-mechanism switches when a process makes a system
-call that blocks (has to wait for an event), typically in \lstinline{read},
-\lstinline{wait},
-or
-\lstinline{sleep}.
-Second, xv6 periodically forces a switch to cope with
-processes that compute for long periods without blocking.
-The former are voluntary switches;
-the latter are called involuntary.
-This multiplexing creates the illusion that
-each process has its own CPU.
+\section{Multiplexação}
 
-Implementing multiplexing poses a few challenges. First, how to switch from one
-process to another? 
-The basic idea is to save and restore CPU registers,
-though the fact that this cannot be expressed in C makes it tricky.
-Second, how to force
-switches in a way that is transparent to user processes?  Xv6 uses the
-standard technique in which a hardware timer's interrupts drive context switches.
-Third, all of the CPUs switch among the same set of processes, so a
-locking plan is necessary to avoid races. Fourth, a process's
-memory and other resources must be freed when the process exits,
-but it cannot do all of this itself
-because (for example) it can't free its own kernel stack while still using it.
-Fifth, each CPU of a multi-core machine must remember which
-process it is executing so that system calls affect the correct
-process's kernel state.
-Finally,  \lstinline{sleep} and \lstinline{wakeup} allow a process to give up
-the CPU and wait to be woken up by another process or interrupt.
-Care is needed to avoid races that result in
-the loss of wakeup notifications.
+O xv6 multiplexa ao alternar cada CPU de um processo para
+outro em duas situações. Primeiro, o mecanismo de
+\lstinline{sleep} e
+\lstinline{wakeup} do xv6 alterna quando um processo faz uma chamada de sistema
+que bloqueia (tem que esperar por um evento), tipicamente em \lstinline{read},
+\lstinline{wait} ou
+\lstinline{sleep}. Em segundo lugar, o xv6 força periodicamente uma troca para lidar com
+processos que computam por longos períodos sem bloquear.
+As primeiras são trocas voluntárias; as últimas são chamadas involuntárias.
+Essa multiplexação cria a ilusão de que
+cada processo tem sua própria CPU.
+
+Implementar a multiplexação apresenta alguns desafios. Primeiro, como alternar de um
+processo para outro? 
+A ideia básica é salvar e restaurar os registradores da CPU,
+embora o fato de que isso não pode ser expresso em C torne a tarefa complicada.
+Em segundo lugar, como forçar
+as trocas de uma maneira que seja transparente para os processos do usuário? O xv6 usa a
+técnica padrão em que os interruptores de um timer de hardware conduzem as trocas de contexto.
+Em terceiro lugar, todas as CPUs alternam entre o mesmo conjunto de processos, então um
+plano de bloqueio é necessário para evitar competições. Em quarto lugar, a
+memória e outros recursos de um processo devem ser liberados quando o processo sai,
+mas ele não pode fazer tudo isso por conta própria
+porque (por exemplo) não pode liberar sua própria pilha de núcleo enquanto ainda a estiver usando.
+Em quinto lugar, cada CPU de uma máquina multi-core deve lembrar qual
+processo está executando para que as chamadas de sistema afetem o estado de núcleo do processo correto.
+Finalmente, \lstinline{sleep} e \lstinline{wakeup} permitem que um processo desista da
+CPU e aguarde ser despertado por outro processo ou interrupção.
+É necessário ter cuidado para evitar competições que resultem na
+perda de notificações de despertar.
 
 %% 
-\section{Code: Context switching}
+\section{Código: Troca de Contexto}
 %% 
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/switch.pdf}
-\caption{Switching from one user process to another.  In this example, xv6 runs with one CPU (and thus one scheduler thread).}
+\caption{Mudança de um processo de usuário para outro. Neste exemplo, o xv6 roda com uma CPU (e, portanto, uma thread de escalonamento).}
 \label{fig:switch}
 \end{figure}
 
-Figure~\ref{fig:switch} 
-outlines the steps involved in switching from one
-user process to another:
-a trap (system
-call or interrupt) from user space to the old process's kernel thread,
-a context switch to the current CPU's scheduler thread, a context
-switch to a new process's kernel thread, and a trap return
-to the user-level process.
-Xv6 has separate threads
-(saved registers and stacks)
-in which to execute the scheduler because
-it is not safe for the scheduler to execute on
-any process's kernel stack: some other CPU might
-wake the process up and run it, and it would be a disaster
-to use the same stack on two different CPUs.
-There is a separate scheduler thread for each CPU to cope
-with situations in which more than one CPU is running
-a process that wants to give up the CPU.
-%
-% I think it may never be safe. if the old process is a ZOMBIE, the
-% parent may mark it UNUSED and another core may allocate it in
-% fork(). if the old process is SLEEPING or RUNNABLE, another core may
-% wake it up and run it.
-%
-% what has changed is that, if we deleted wait(), it would 
-% be safe for an exit()ing process to set its state to UNUSED
-% directly (no ZOMBIE, no need for parent cleanup).
-%
-In this section we'll examine the mechanics of switching
-between a kernel thread and a scheduler thread.
+A Figura~\ref{fig:switch} 
+esboça os passos envolvidos na troca de um
+processo de usuário para outro:
+uma trap (chamada de sistema ou interrupção) do espaço do usuário para a thread de núcleo do processo antigo,
+uma troca de contexto para a thread de escalonamento da CPU atual, uma troca
+de contexto para a thread de núcleo de um novo processo, e um retorno de trap
+para o processo em nível de usuário.
+O xv6 possui threads separadas
+(registradores e pilhas salvos)
+em que executar o escalonador porque
+não é seguro para o escalonador executar na
+pilha de núcleo de qualquer processo: outra CPU pode
+acordar o processo e executá-lo, e seria um desastre
+usar a mesma pilha em duas CPUs diferentes.
+Há uma thread de escalonamento separada para cada CPU para lidar
+com situações em que mais de uma CPU está executando
+um processo que deseja desistir da CPU.
 
-Switching from one thread to another involves saving the old thread's
-CPU registers, and restoring the previously-saved registers of the
-new thread; the fact that
-the stack pointer and program counter
-are saved and restored means that the CPU will switch stacks and
-switch what code it is executing.
+Nesta seção, examinaremos a mecânica de troca
+entre uma thread de núcleo e uma thread de escalonamento.
 
-The function
+Trocar de uma thread para outra envolve salvar os
+registradores da CPU da thread antiga e restaurar os registradores
+salvos anteriormente da nova thread; o fato de que
+o ponteiro da pilha e o contador de programa
+são salvos e restaurados significa que a CPU trocará de pilha e
+trocará o código que está executando.
+
+A função
 \indexcode{swtch}
-saves and restores registers for a kernel thread switch.
+salva e restaura registradores para uma troca de thread de núcleo.
 \lstinline{swtch}
-doesn't directly know about threads; it just saves and
-restores sets of RISC-V registers, called 
-\indextext{contexts}.
-When it is time for a process to give up the CPU,
-the process's kernel thread calls
+não conhece diretamente as threads; ela apenas salva e
+restaura conjuntos de registradores RISC-V, chamados de
+\indextext{contextos}.
+Quando é hora de um processo desistir da CPU,
+a thread de núcleo do processo chama
 \lstinline{swtch}
-to save its own context and restore the scheduler's context.
-Each context is contained in a
+para salvar seu próprio contexto e restaurar o contexto do escalonador.
+Cada contexto está contido em uma
 \lstinline{struct}
 \lstinline{context}
-itself contained in a process's
+\lineref{kernel/proc.h:/^struct.context/},
+que está contida na
 \lstinline{struct proc}
-or a CPU's
-\lstinline{struct cpu}.
+de um processo ou na
+\lstinline{struct cpu}
+de uma CPU.
 \lstinline{swtch}
-takes two arguments:
+recebe dois argumentos:
 \indexcode{struct context}
 \lstinline{*old}
-and
+e
 \lstinline{struct}
 \lstinline{context}
 \lstinline{*new}.
-It saves the current registers in
+Ela salva os registradores atuais em
 \lstinline{old},
-loads registers from 
+carrega os registradores de 
 \lstinline{new},
-and returns.
+e retorna.
 
-Let's follow a process through
+Vamos acompanhar um processo através de
 \lstinline{swtch} 
-into the scheduler.
-We saw in Chapter~\ref{CH:TRAP}
-that one possibility at the end of an interrupt is that 
+para o escalonador.
+Vimos no Capítulo~\ref{CH:TRAP}
+que uma possibilidade ao final de uma interrupção é que 
 \indexcode{usertrap}
-calls 
+chame 
 \indexcode{yield}.
 \lstinline{yield}
-in turn calls
+por sua vez chama
 \indexcode{sched},
-which calls
+que chama
 \indexcode{swtch}
-to save the current context in
+para salvar o contexto atual em
 \lstinline{p->context}
-and switch to the scheduler context previously saved in 
+e trocar para o contexto do escalonador previamente salvo em 
 \indexcode{cpu->context}
+\lineref{kernel/proc.c:/swtch..p/}.
 
 \lstinline{swtch}
-saves only callee-saved registers;
-the C compiler generates code in the caller to save
-caller-saved registers on the stack.
-\lstinline{swtch} knows the offset of each
-register's field in 
+\lineref{kernel/swtch.S:/swtch/}
+salva apenas os registradores salvos pelo chamador;
+o compilador C gera código no chamador para salvar
+os registradores salvos pelo chamador na pilha.
+\lstinline{swtch} conhece o deslocamento de cada
+campo de registrador em 
 \lstinline{struct context}.
-It does not save the program counter.
-Instead,
+Ela não salva o contador de programa.
+Em vez disso,
 \lstinline{swtch}
-saves the
-\lstinline{ra} register,
-which holds the return address from which
+salva o
+registrador \lstinline{ra},
+que armazena o endereço de retorno de onde
 \lstinline{swtch}
-was called.
-Now
+foi chamado.
+Agora
 \lstinline{swtch}
-restores registers from the new context,
-which holds register values saved by a previous
-\lstinline{swtch}.
-When 
+restaura os registradores do novo contexto,
+que contém os valores dos registradores salvos por um
+\lstinline{swtch} anterior.
+Quando 
 \lstinline{swtch}
-returns, it returns to the instructions pointed to
-by the restored
-\lstinline{ra}
-register, that is,
-the instruction from which the new thread previously
-called \lstinline{swtch}.
-In addition, it returns on the new thread's stack,
-since that's where the restored \lstinline{sp} points.
+retorna, ele retorna para as instruções apontadas pelo
+registrador restaurado
+\lstinline{ra}, ou seja,
+a instrução de onde a nova thread anteriormente
+chamou \lstinline{swtch}.
+Além disso, ele retorna na pilha da nova thread,
+uma vez que é para lá que o ponteiro da pilha restaurado
+aponta.
 
-In our example, 
+No nosso exemplo, 
 \indexcode{sched}
-called
+chamou
 \indexcode{swtch}
-to switch to
+para trocar para
 \indexcode{cpu->context},
-the per-CPU scheduler context.
-That context was saved at the point in the past when
+o contexto do escalonador por CPU.
+Esse contexto foi salvo no momento do passado em que
 \lstinline{scheduler}
-called
+chamou
 \lstinline{swtch}
-to switch to the process that's now giving up the CPU.
-When the
+\lineref{kernel/proc.c:/swtch.&c/}
+para trocar para o processo que agora está desistindo da CPU.
+Quando o
 \indexcode{swtch}
-we have been tracing returns,
-it returns not to
+que estamos rastreando retorna,
+ele retorna não para
 \lstinline{sched}
-but to 
+mas para 
 \indexcode{scheduler},
-with the stack pointer in the current CPU's
-scheduler stack.
+com o ponteiro da pilha na pilha do
+escalonador da CPU atual.
 %% 
-\section{Code: Scheduling}
+\section{Código: Escalonamento}
 %% 
 
-The last section looked at the low-level details of
-\indexcode{swtch};
-now let's take 
+A última seção analisou os detalhes de baixo nível de
+\indexcode{swtch}; agora vamos considerar 
 \lstinline{swtch}
-as a given and examine 
-switching from one process's kernel thread
-through the scheduler to another process.
-The scheduler exists in the form of a special thread per CPU, each running the
-\lstinline{scheduler}
-function.
-This function is in charge of choosing which process to run next.
-A process
-that wants to give up the CPU must
-acquire its own process lock
+como dado e examinar 
+a troca de uma thread de núcleo de um processo
+pelo escalonador para outro processo.
+O escalonador existe na forma de uma thread especial por CPU, cada uma executando a
+função \lstinline{scheduler}.
+Essa função é responsável por escolher qual processo executar em seguida.
+Um processo
+que deseja desistir da CPU deve
+adquirir seu próprio bloqueio de processo
 \indexcode{p->lock},
-release any other locks it is holding,
-update its own state
+liberar qualquer outro bloqueio que esteja segurando,
+atualizar seu próprio estado
 (\lstinline{p->state}),
-and then call
+e então chamar
 \indexcode{sched}.
-You can see this sequence in
+Você pode ver essa sequência em
 \lstinline{yield}
+\lineref{kernel/proc.c:/^yield/},
 \texttt{sleep}
-and
+e
 \texttt{exit}.
 \lstinline{sched}
-double-checks some of those requirements
-and then checks an implication:
-since a lock is held, interrupts should be disabled.
-Finally,
+verifica novamente alguns desses requisitos
+\linerefs{kernel/proc.c:/if..holding/,/running/}
+e então verifica uma implicação:
+uma vez que um bloqueio está segurado, as interrupções devem ser desabilitadas.
+Finalmente,
 \indexcode{sched}
-calls
+chama
 \indexcode{swtch}
-to save the current context in 
+para salvar o contexto atual em 
 \lstinline{p->context}
-and switch to the scheduler context in
+e trocar para o contexto do escalonador em
 \indexcode{cpu->context}.
 \lstinline{swtch}
-returns on the scheduler's stack
-as though
-\indexcode{scheduler}'s
-\lstinline{swtch}
-had returned
-The scheduler continues its
+retorna na pilha do escalonador
+como se o
+\indexcode{scheduler}
+tivesse retornado de
+\lineref{kernel/proc.c:/swtch.*contex.*contex/}.
+O escalonador continua seu
 \lstinline{for}
-loop, finds a process to run, 
-switches to it, and the cycle repeats.
+loop, encontra um processo para executar, 
+troca para ele, e o ciclo se repete.
 
-We just saw that xv6 holds
+Acabamos de ver que o xv6 mantém
 \indexcode{p->lock}
-across calls to
+durante chamadas para
 \lstinline{swtch}:
-the caller of
+o chamador de
 \indexcode{swtch}
-must already hold the lock, and control of the lock passes to the
-switched-to code.  This arrangement is unusual: it's more common for
-the thread that acquires a lock to also release it.
-Xv6's context switching must break this convention because
+deve já estar segurando o bloqueio, e o controle do bloqueio passa para o
+código para o qual foi feita a troca. Essa disposição é incomum: é mais comum que
+a thread que adquire um bloqueio também o libere.
+A troca de contexto do xv6 deve quebrar essa convenção porque
 \indexcode{p->lock}
-protects invariants on the process's
+protege invariantes nos campos
 \lstinline{state}
-and
+e
 \lstinline{context}
-fields that are not true while executing in
+do processo que não são verdadeiros enquanto executa em
 \lstinline{swtch}.
-For example, if
+Por exemplo, se
 \lstinline{p->lock}
-were not held during
+não fosse segurado durante
 \indexcode{swtch},
-a different CPU might decide
-to run the process after 
+uma CPU diferente poderia decidir
+executar o processo depois que 
 \indexcode{yield}
-had set its state to
+definiu seu estado como
 \lstinline{RUNNABLE},
-but before 
+mas antes que 
 \lstinline{swtch}
-caused it to stop using its own kernel stack.
-The result would be two CPUs running on the same stack,
-which would cause chaos.
-Once \lstinline{yield} has started to modify a running process's state
-to make it
+fizesse com que ele parasse de usar sua própria pilha de núcleo.
+O resultado seria duas CPUs executando na mesma pilha,
+o que causaria caos.
+Uma vez que \lstinline{yield} começou a modificar o estado de um processo em execução
+para torná-lo
 \lstinline{RUNNABLE},
-\lstinline{p->lock} must remain held until the invariants are restored:
-the earliest correct release point is after
+\lstinline{p->lock} deve permanecer segurado até que as invariantes sejam restauradas:
+o ponto de liberação correto mais cedo é após
 \lstinline{scheduler}
-(running on its own stack)
-clears
+(executando em sua própria pilha)
+limpar
 \lstinline{c->proc}.
-Similarly, once 
+De maneira semelhante, uma vez que 
 \lstinline{scheduler}
-starts to convert a \lstinline{RUNNABLE} process to
+começa a converter um processo \lstinline{RUNNABLE} para
 \lstinline{RUNNING},
-the lock cannot be released until the process's kernel thread
-is completely running (after the
+o bloqueio não pode ser liberado até que a thread de núcleo do processo
+esteja completamente em execução (após o
 \lstinline{swtch},
-for example in
+por exemplo, em
 \lstinline{yield}).
 
-The only place a kernel thread gives up its CPU is in
+O único lugar onde uma thread de núcleo desiste de sua CPU é em
 \lstinline{sched},
-and it always switches to the same location in \lstinline{scheduler}, which
-(almost) always switches to some kernel thread that previously called
+e ela sempre troca para a mesma localização em \lstinline{scheduler}, que
+(quase) sempre troca para alguma thread de núcleo que anteriormente chamou
 \lstinline{sched}. 
-Thus, if one were to print out the line numbers where xv6 switches
-threads, one would observe the following simple pattern:
-and so on.
-Procedures that intentionally transfer control to each other via thread
-switch are sometimes referred to as
-\indextext{coroutines}; 
-in this example,
+Assim, se alguém imprimisse os números de linha onde o xv6 troca
+threads, observaria o seguinte padrão simples:
+\lineref{kernel/proc.c:/swtch..c/},
+\lineref{kernel/proc.c:/swtch..p/},
+\lineref{kernel/proc.c:/swtch..c/},
+\lineref{kernel/proc.c:/swtch..p/},
+e assim por diante.
+Procedimentos que transferem controle intencionalmente entre si por meio da troca de threads
+são às vezes chamados de
+\indextext{corrotinas}; 
+neste exemplo,
 \indexcode{sched}
-and
+e
 \indexcode{scheduler}
-are co-routines of each other.
+são corrotinas uma da outra.
 
-There is one case when the scheduler's call to
+Há um caso em que a chamada do escalonador para
 \indexcode{swtch}
-does not end up in
+não termina em
 \indexcode{sched}.
-\lstinline{allocproc} sets the context \lstinline{ra}
-register of a new process to
+\lstinline{allocproc} define o registrador de contexto \lstinline{ra}
+de um novo processo para
 \indexcode{forkret}
-so that its first \lstinline{swtch} ``returns'' 
-to the start of that function.
+\lineref{kernel/proc.c:/^forkret/},
+de modo que seu primeiro \lstinline{swtch} "retorna" 
+para o início dessa função.
 \lstinline{forkret}
-exists to release the 
+existe para liberar o 
 \indexcode{p->lock};
-otherwise, since the new process needs to
-return to user space as if returning from \lstinline{fork},
-it could instead start at
+caso contrário, como o novo processo precisa
+retornar ao espaço do usuário como se retornasse de \lstinline{fork},
+poderia começar em
 \lstinline{usertrapret}.
 
 \lstinline{scheduler}
-runs a loop:
-find a process to run, run it until it yields, repeat.
-The scheduler
-loops over the process table
-looking for a runnable process, one that has
+\lineref{kernel/proc.c:/^scheduler/} 
+executa um loop:
+encontra um processo para executar, executa-o até que ele desista, repete.
+O escalonador
+percorre a tabela de processos
+procurando um processo executável, um que tenha
 \lstinline{p->state} 
 \lstinline{==}
 \lstinline{RUNNABLE}.
-Once it finds a process, it sets the per-CPU current process
-variable
+Uma vez que encontra um processo, define a variável do processo atual por CPU
 \lstinline{c->proc},
-marks the process as
+marca o processo como
 \lstinline{RUNNING},
-and then calls
+e então chama
 \indexcode{swtch}
-to start running it
-
+para começar a executá-lo
+\linerefs{kernel/proc.c:/Switch.to/,/swtch/}.
 
 %% 
-\section{Code: mycpu and myproc}
+\section{Código: mycpu e myproc}
 %% 
 
-Xv6 often needs a pointer to the current process's \lstinline{proc}
-structure. On a uniprocessor one could have a global variable pointing
-to the current \lstinline{proc}. This doesn't work on a multi-core
-machine, since each CPU executes a different process. The way to
-solve this problem is to exploit the fact that each CPU has its own
-set of registers.
+O xv6 frequentemente precisa de um ponteiro para a estrutura \lstinline{proc} do processo atual. Em um uniprocessador, poderia haver uma variável global apontando para o \lstinline{proc} atual. 
+Isso não funciona em uma máquina multi-core, uma vez que cada CPU executa um processo diferente. A maneira de resolver esse problema é explorar o fato de que cada CPU tem seu próprio conjunto de 
+registradores.
 
-While a given CPU is executing in the kernel, xv6 ensures that the CPU's \lstinline{tp}
-register always holds the CPU's hartid.
-RISC-V numbers its CPUs, giving each
-a unique \indextext{hartid}.
-\indexcode{mycpu}
-uses \lstinline{tp} to index an array
-of \lstinline{cpu} structures and return the one
-for the current CPU.
-A
-\indexcode{struct cpu}
-holds a pointer to the \lstinline{proc}
-structure of
-the process currently running
-on that CPU (if any),
-saved registers for the CPU's scheduler thread,
-and the count of nested spinlocks needed to manage
-interrupt disabling.
+Enquanto uma CPU específica está executando no núcleo, o xv6 garante que o registrador \lstinline{tp} da CPU sempre contenha o hartid da CPU. O RISC-V numera suas CPUs, dando a cada uma um 
+\indextext{hartid} único. A \indexcode{mycpu} \lineref{kernel/proc.c:/^mycpu/} usa \lstinline{tp} para indexar um array de estruturas \lstinline{cpu} e retornar a correspondente à CPU atual. Uma 
+\indexcode{struct cpu} \lineref{kernel/proc.h:/^struct.cpu/} contém um ponteiro para a estrutura \lstinline{proc} do processo que está atualmente em execução nessa CPU (se houver), registradores 
+salvos para a thread de escalonamento da CPU e a contagem de spinlocks aninhados necessários para gerenciar a desativação de interrupções.
 
-Ensuring that a CPU's \lstinline{tp} holds the CPU's
-hartid is a little involved, since user code is free
-to modify \lstinline{tp}. \lstinline{start} sets the \lstinline{tp}
-register early in the CPU's boot sequence, while still in machine mode
-\lstinline{usertrapret} saves \lstinline{tp} in the trampoline
-page, in case user code modifies it.
-Finally, \lstinline{uservec} restores that saved \lstinline{tp}
-when entering the kernel from user space
-The compiler guarantees never to modify \lstinline{tp}
-in kernel code.
-It would be more convenient if xv6 could ask the RISC-V
-hardware for the current hartid whenever needed,
-but RISC-V allows that only in
-machine mode, not in supervisor mode.
+Garantir que o \lstinline{tp} de uma CPU mantenha o hartid da CPU é um pouco complicado, uma vez que o código do usuário pode modificar \lstinline{tp}. A \lstinline{start} define o registrador 
+\lstinline{tp} no início da sequência de inicialização da CPU, enquanto ainda está em modo de máquina \lineref{kernel/start.c:/w_tp/}. A \lstinline{usertrapret} salva \lstinline{tp} na página do 
+trampolim, caso o código do usuário o modifique. Finalmente, a \lstinline{uservec} restaura o \lstinline{tp} salvo ao entrar no núcleo a partir do espaço do usuário 
+\lineref{kernel/trampoline.S:/make tp hold/}. O compilador garante nunca modificar \lstinline{tp} no código do núcleo. Seria mais conveniente se o xv6 pudesse perguntar ao hardware RISC-V pelo 
+hartid atual sempre que necessário, mas o RISC-V permite isso apenas em modo de máquina, não em modo de supervisor.
 
-The return values of
-\lstinline{cpuid}
-and
-\lstinline{mycpu}
-are fragile: if the timer were to interrupt and cause
-the thread to yield and later resume execution on a different CPU,
-a previously returned value would no longer be correct.
-To avoid this problem, xv6 requires that callers 
-disable interrupts, and only enable
-them after they finish using the returned
-\lstinline{struct cpu}.
+Os valores de retorno de \lstinline{cpuid} e \lstinline{mycpu} são frágeis: se o timer interromper e causar a thread a desistir e depois retomar a execução em uma CPU diferente, um valor retornado 
+anteriormente não será mais correto. Para evitar esse problema, o xv6 requer que os chamadores desativem as interrupções e só as reativem depois de terminarem de usar a \lstinline{struct cpu} 
+retornada.
 
-The function
-\indexcode{myproc}
-returns the
-\lstinline{struct proc}
-pointer
-for the process that is running on the current CPU.
-\lstinline{myproc}
-disables interrupts, invokes
-\lstinline{mycpu},
-fetches the current process pointer
-(\lstinline{c->proc})
-out of the
-\lstinline{struct cpu},
-and then enables interrupts.
-The return value of
-\lstinline{myproc}
-is safe to use even if interrupts are enabled:
-if a timer interrupt moves the calling process to a
-different CPU, its
-\lstinline{struct proc}
-pointer will stay the same.
+A função \indexcode{myproc} \lineref{kernel/proc.c:/^myproc/} retorna o ponteiro da \lstinline{struct proc} para o processo que está em execução na CPU atual. A \lstinline{myproc} desativa as 
+interrupções, invoca \lstinline{mycpu}, busca o ponteiro do processo atual (\lstinline{c->proc}) da \lstinline{struct cpu}, e então habilita as interrupções. O valor de retorno de 
+\lstinline{myproc} é seguro para uso mesmo se as interrupções estiverem habilitadas: se uma interrupção de timer mover o processo chamador para uma CPU diferente, seu ponteiro da \lstinline{struct 
+proc} permanecerá o mesmo.
 %% 
-\section{Sleep and wakeup}
+\section{Dormir e Acordar}
 \label{sec:sleep}
 %% 
 
-Scheduling and locks help conceal the actions of one thread
-from another,
-but we also need abstractions that help
-threads intentionally interact.
-For example, the reader of a pipe in xv6 may need to wait
-for a writing process to produce data;
-a parent's call to \lstinline{wait} may need to
-wait for a child to exit; and
-a process reading the disk needs to wait
-for the disk hardware to finish the read.
-The xv6 kernel uses a mechanism called sleep and wakeup
-in these situations (and many others).
-Sleep allows a kernel thread to
-wait for a specific event; another thread can call wakeup 
-to indicate that threads waiting for a specified event should resume.
-Sleep and wakeup are often called 
-\indextext{sequence coordination}
-or 
-\indextext{conditional synchronization}
-mechanisms.
+O escalonamento e os bloqueios ajudam a ocultar as ações de uma thread
+de outra, mas também precisamos de abstrações que ajudem
+as threads a interagir intencionalmente.
+Por exemplo, o leitor de um pipe no xv6 pode precisar esperar
+que um processo escritor produza dados;
+a chamada de um pai para \lstinline{wait} pode precisar esperar
+que um filho saia; e
+um processo lendo do disco precisa esperar
+que o hardware do disco termine a leitura.
+O núcleo do xv6 usa um mecanismo chamado dormir e acordar
+nessas situações (e muitas outras).
+Dormir permite que uma thread de núcleo
+espere por um evento específico; outra thread pode chamar acordar 
+para indicar que as threads esperando por um evento especificado devem retomar.
+Dormir e acordar são frequentemente chamados de 
+\indextext{coordenação de sequência}
+ou 
+\indextext{sincronização condicional}
+mecanismos.
 
-Sleep and wakeup provide a relatively low-level synchronization
-interface. To motivate the way they work in xv6,
-we'll use them to build a higher-level
-synchronization mechanism called a \indextext{semaphore}~\cite{dijkstra65} that
-coordinates producers and consumers
-(xv6 does not use semaphores).
-A semaphore maintains a count and provides two operations.
-The ``V'' operation (for the producer) increments the count.
-The ``P'' operation (for the consumer) waits until the count is non-zero,
-and then decrements it and returns.
-If there were only one producer thread and one consumer thread,
-and they executed on different CPUs,
-and the compiler didn't optimize too aggressively,
-this implementation would be correct:
+Dormir e acordar fornecem uma interface de sincronização
+relativamente de baixo nível. Para motivar a maneira como funcionam no xv6,
+usaremos esses mecanismos para construir uma sincronização de nível superior
+chamada \indextext{semaforo}~\cite{dijkstra65} que
+coordena produtores e consumidores
+(o xv6 não usa semáforos).
+Um semáforo mantém uma contagem e fornece duas operações.
+A operação "V" (para o produtor) incrementa a contagem.
+A operação "P" (para o consumidor) espera até que a contagem seja diferente de zero,
+e então a decrementa e retorna.
+Se houvesse apenas uma thread produtora e uma thread consumidora,
+e elas fossem executadas em CPUs diferentes,
+e o compilador não otimizasse de forma agressiva,
+essa implementação seria correta:
 \begin{lstlisting}[numbers=left,firstnumber=100]
   struct semaphore {
     struct spinlock lock;
@@ -503,53 +444,53 @@ this implementation would be correct:
   }
 \end{lstlisting}
 
-The implementation above 
-is expensive.  If the producer acts
-rarely, the consumer will spend most
-of its time spinning in the 
+A implementação acima 
+é cara. Se o produtor agir
+raramente, o consumidor passará a maior parte
+do seu tempo girando no 
 \lstinline{while}
-loop hoping for a non-zero count.
-The consumer's CPU could probably find more productive work than 
-\indextext{busy waiting}
-by repeatedly 
-\indextext{polling}
+loop esperando por uma contagem não zero.
+A CPU do consumidor poderia provavelmente encontrar um trabalho mais produtivo do que 
+\indextext{espera ocupada}
+ao 
+\indextext{consultar}
+repetidamente 
 \lstinline{s->count}.
-Avoiding busy waiting requires
-a way for the consumer to yield the CPU
-and resume only after
+Evitar a espera ocupada requer
+uma maneira para que o consumidor desista da CPU
+e retome apenas após
 \lstinline{V}
-increments the count.
+incrementar a contagem.
 
-Here's a step in that direction, though as we
-will see it is not enough.
-Let's imagine a pair of calls, 
+Aqui está um passo nessa direção, embora, como veremos, não seja suficiente.
+Vamos imaginar um par de chamadas, 
 \indexcode{sleep}
-and
+e
 \indexcode{wakeup},
-that work as follows.
+que funcionam da seguinte forma.
 \lstinline{sleep(chan)}
-waits for an event designated by the value of
+espera por um evento designado pelo valor de
 \indexcode{chan},
-called the 
-\indextext{wait channel}.
+chamado de 
+\indextext{canal de espera}.
 \lstinline{sleep}
-puts the calling process to sleep, releasing the CPU
-for other work.
+coloca o processo chamador para dormir, liberando a CPU
+para outro trabalho.
 \lstinline{wakeup(chan)}
-wakes all processes that are in calls
-to \lstinline{sleep} with the same
+acorda todos os processos que estão em chamadas
+para \lstinline{sleep} com o mesmo
 \lstinline{chan}
-(if any), causing their
-\lstinline{sleep}
-calls to return.
-If no processes are waiting on
+(se houver), fazendo com que suas
+chamadas de \lstinline{sleep}
+retornem.
+Se nenhum processo estiver esperando em
 \lstinline{chan},
 \lstinline{wakeup}
-does nothing.
-We can change the semaphore implementation to use
+não faz nada.
+Podemos mudar a implementação do semáforo para usar
 \lstinline{sleep}
-and
-\lstinline{wakeup} (changes highlighted in yellow):
+e
+\lstinline{wakeup} (mudanças destacadas em amarelo):
 \begin{lstlisting}[numbers=left,firstnumber=200]
   void
   V(struct semaphore *s)
@@ -571,70 +512,62 @@ and
   }
 \end{lstlisting}
 
-% \begin{figure}[t]
-% \center
-% \includegraphics[scale=0.5]{fig/deadlock.pdf}
-% \caption{Example lost wakeup problem}
-% \label{fig:deadlock}
-% \end{figure}
-
-\lstinline{P}
-now gives up the CPU instead of spinning, which is nice.
-However, it turns out not to be straightforward to design
+A \lstinline{P}
+agora desiste da CPU em vez de girar, o que é bom.
+No entanto, não é simples projetar
 \lstinline{sleep}
-and 
+e 
 \lstinline{wakeup}
-with this interface without suffering
-from what is known as the \indextext{lost wake-up} problem.
-% (see 
-% Figure~\ref{fig:deadlock}).
-Suppose that
-\lstinline{P}
-finds that
+com essa interface sem sofrer
+do que é conhecido como o problema de \indextext{perda de despertador}.
+Suponha que
+a \lstinline{P}
+descubra que
 \lstinline{s->count}
 \lstinline{==}
 \lstinline{0} 
-on line~\ref{line:test}.
-While
+na linha~\ref{line:test}.
+Enquanto
 \lstinline{P}
-is between lines~\ref{line:test} and~\ref{line:sleep},
-\lstinline{V}
-runs on another CPU:
-it changes
+está entre as linhas~\ref{line:test} e~\ref{line:sleep},
+a \lstinline{V}
+é executada em outra CPU:
+ela muda
 \lstinline{s->count}
-to be nonzero and calls
+para ser não zero e chama
 \lstinline{wakeup},
-which finds no processes sleeping and thus does nothing.
-Now
+que não encontra processos dormindo e, portanto, não faz nada.
+Agora
 \lstinline{P}
-continues executing at line~\ref{line:sleep}:
-it calls
+continua executando na linha~\ref{line:sleep}:
+ela chama
 \lstinline{sleep}
-and goes to sleep.
-This causes a problem:
-\lstinline{P}
-is asleep waiting for a \lstinline{V} call
-that has already happened.
-Unless we get lucky and the producer calls
-\lstinline{V} again, the consumer will wait
-forever even
-though the count is non-zero.
+e vai dormir.
+Isso causa um problema:
+a \lstinline{P}
+está dormindo esperando por uma chamada de \lstinline{V}
+que já aconteceu.
+A menos que tenhamos sorte e o produtor chame
+\lstinline{V} novamente, o consumidor irá esperar
+para sempre, mesmo
+que a contagem seja não zero.
 
-The root of this problem is that the
-invariant that
+A raiz desse problema é que a
+invariante de que
 \lstinline{P}
-sleeps only when
+dorme apenas quando
 \lstinline{s->count}
 \lstinline{==}
 \lstinline{0}
-is violated by 
+é violada pela 
+execução da 
 \lstinline{V}
-running at just the wrong moment.
-An incorrect way to protect the invariant would be to 
-move the lock acquisition (highlighted in yellow below) in
+no momento errado.
+Uma maneira incorreta de proteger a invariante seria 
+mover a aquisição do bloqueio (destacada em amarelo abaixo) em
 \lstinline{P}
-so that its check of the count and its call to \lstinline{sleep}
-are atomic:
+para que sua verificação da contagem e sua chamada para \lstinline{sleep}
+sejam atômicas:
 \begin{lstlisting}[numbers=left,firstnumber=300]
   void
   V(struct semaphore *s)
@@ -655,35 +588,34 @@ are atomic:
     release(&s->lock);
   }
 \end{lstlisting}
-One might hope that this version of
+Pode-se esperar que esta versão da
 \lstinline{P}
-would avoid the lost wakeup because the lock prevents
-\lstinline{V}
-from executing between lines~\ref{line:test1} and~\ref{line:sleep1}.
-It does that, but it also deadlocks:
-\lstinline{P}
-holds the lock while it sleeps,
-so \lstinline{V} will block forever waiting for the lock.
+evite a perda de despertador porque o bloqueio impede
+a \lstinline{V}
+de executar entre as linhas~\ref{line:test1} e~\ref{line:sleep1}.
+Isso acontece, mas também causa um deadlock:
+a \lstinline{P}
+mantém o bloqueio enquanto dorme,
+então a \lstinline{V} ficará bloqueada para sempre esperando pelo bloqueio.
 
-We'll fix the preceding scheme by changing
-\lstinline{sleep}'s
-interface:
-the caller must pass the \indextext{condition lock} to
+Vamos corrigir o esquema anterior mudando
+a interface de \lstinline{sleep}:
+o chamador deve passar o \indextext{bloqueio de condição} para
 \lstinline{sleep}
-so it can release the lock after
-the calling process is marked as asleep and waiting on the
-sleep channel.
-The lock will force a concurrent
-\lstinline{V}
-to wait until \lstinline{P} has finished putting itself to sleep,
-so that the
+para que ele possa liberar o bloqueio após
+o processo chamador ser marcado como dormindo e esperando no
+canal de espera.
+O bloqueio forçará uma
+\lstinline{V} concorrente
+a esperar até que a \lstinline{P} tenha terminado de se colocar para dormir,
+para que a
 \lstinline{wakeup}
-will find the sleeping consumer and wake it up.
-Once the consumer is awake again
-\indexcode{sleep}
-reacquires the lock before returning.
-Our new correct sleep/wakeup scheme is usable as follows (change
-highlighted in yellow):
+encontre o consumidor dormindo e o acorde.
+Uma vez que o consumidor acorde novamente,
+a \indexcode{sleep}
+readquire o bloqueio antes de retornar.
+Nosso novo esquema correto de dormir/acordar pode ser usado da seguinte forma (mudança
+destacada em amarelo):
 \begin{lstlisting}[numbers=left,firstnumber=400]
   void
   V(struct semaphore *s)
@@ -705,759 +637,728 @@ highlighted in yellow):
   }
 \end{lstlisting}
 
-The fact that
+O fato de que
 \lstinline{P}
-holds
+segura
 \lstinline{s->lock}
-prevents 
+impede que 
 \lstinline{V}
-from trying to wake it up between 
-\lstinline{P}'s
-check of
+tente acordá-la entre 
+a verificação de
 \lstinline{s->count}
-and its call to
+de 
+\lstinline{P}
+e sua chamada para
 \lstinline{sleep}.
-However, 
+No entanto, 
 \lstinline{sleep}
-must release
+deve liberar
 \lstinline{s->lock}
-and put the consuming process to sleep
-in a way that's atomic from the point of view of \lstinline{wakeup},
-in order to avoid lost wakeups.
+e colocar o processo consumidor para dormir
+de uma maneira que seja atômica do ponto de vista de \lstinline{wakeup},
+para evitar perdas de despertador.
 
 %% 
-\section{Code: Sleep and wakeup}
+\section{Código: Dormir e Acordar}
 %% 
 
-Xv6's
-\indexcode{sleep}
-and
-\indexcode{wakeup}
-provide the interface used in the last example above.
-The basic idea is to have
-\lstinline{sleep}
-mark the current process as
+As funções \indexcode{sleep} \lineref{kernel/proc.c:/^sleep/} e
+\indexcode{wakeup} \lineref{kernel/proc.c:/^wakeup/} do xv6
+fornecem a interface usada no último exemplo acima.
+A ideia básica é que \lstinline{sleep} marque o processo atual como
 \indexcode{SLEEPING}
-and then call
-\indexcode{sched}
-to release the CPU;
-\lstinline{wakeup}
-looks for a process sleeping on the given wait channel
-and marks it as 
+e então chame \indexcode{sched} para liberar a CPU;
+\lstinline{wakeup} procura um processo dormindo no canal de espera dado
+e o marca como 
 \indexcode{RUNNABLE}.
-Callers of
+Os chamadores de
 \lstinline{sleep}
-and
+e
 \lstinline{wakeup}
-can use any mutually convenient number as the channel.
-Xv6 often uses the address
-of a kernel data structure involved in the waiting.
+podem usar qualquer número mutuamente conveniente como o canal.
+O xv6 frequentemente usa o endereço
+de uma estrutura de dados do núcleo envolvida na espera.
 
-\lstinline{sleep}
-acquires 
-\indexcode{p->lock}
-and {\it only then} releases
+A \lstinline{sleep}
+adquire 
+\indexcode{p->lock} \lineref{kernel/proc.c:/DOC: sleeplock1/}
+e {\it somente então} libera
 \lstinline{lk}.
-As we'll see, the fact that \lstinline{sleep}
-holds one or the other of these locks at all times is what
-prevents a concurrent \lstinline{wakeup}
-(which must acquire and hold both) from acting.
-Now that
+Como veremos, o fato de que \lstinline{sleep}
+segura um ou outro desses bloqueios em todos os momentos é o que
+impede uma \lstinline{wakeup} concorrente
+(que deve adquirir e manter ambos) de agir.
+Agora que
 \lstinline{sleep}
-holds just
+segura apenas
 \lstinline{p->lock},
-it can put the process to sleep by recording
-the sleep channel,
-changing the process state to \texttt{SLEEPING},
-and calling
-\lstinline{sched}
-In a moment it will be clear why it's critical that
-\lstinline{p->lock} is not released (by \lstinline{scheduler}) until after
-the process is marked \texttt{SLEEPING}.
+pode colocar o processo para dormir registrando
+o canal de espera,
+mudando o estado do processo para \texttt{SLEEPING},
+e chamando
+\lstinline{sched} \linerefs{kernel/proc.c:/chan.=.chan/,/sched/}.
+Em breve ficará claro por que é crítico que
+\lstinline{p->lock} não seja liberado (pelo \lstinline{scheduler}) até depois
+que o processo esteja marcado como \texttt{SLEEPING}.
 
-At some point, a process will acquire the condition lock,
-set the condition that the sleeper is waiting for,
-and call \lstinline{wakeup(chan)}.
-It's important that \lstinline{wakeup} is called
-while holding the condition lock\footnote{%
+Em algum momento, um processo adquirirá o bloqueio de condição,
+definirá a condição que o dorminhoco está esperando,
+e chamará \lstinline{wakeup(chan)}.
+É importante que \lstinline{wakeup} seja chamado
+enquanto segura o bloqueio de condição\footnote{%
 %
-Strictly speaking it is sufficient if
+Estritamente falando, é suficiente se
 \lstinline{wakeup}
-merely follows the
+meramente seguir o
 \lstinline{acquire}
-(that is, one could call
+(ou seja, poderia-se chamar
 \lstinline{wakeup}
-after the
+após o
 \lstinline{release}).%
 %
 }.
-\lstinline{wakeup}
-loops over the process table
-It acquires the
+A \lstinline{wakeup}
+percorre a tabela de processos
+\lineref{kernel/proc.c:/^wakeup\(/}.
+Ela adquire o
 \lstinline{p->lock}
-of each process it inspects.
-When \lstinline{wakeup} finds a process in state
+de cada processo que inspeciona.
+Quando \lstinline{wakeup} encontra um processo no estado
 \indexcode{SLEEPING}
-with a matching
-\indexcode{chan},
-it changes that process's state to
+com um
+\indexcode{chan}
+correspondente,
+ela muda o estado desse processo para
 \indexcode{RUNNABLE}.
-The next time \lstinline{scheduler} runs, it will
-see that the process is ready to be run.
+Na próxima vez que o \lstinline{scheduler} rodar, ele verá que o processo está pronto para ser executado.
 
-Why do the locking rules for 
+Por que as regras de bloqueio para 
 \lstinline{sleep}
-and
+e
 \lstinline{wakeup}
-ensure that a process that's going to sleep
-won't miss a concurrent wakeup?
-The going-to-sleep process holds either
-the condition lock or its own
+garantem que um processo que está indo para dormir
+não perderá um despertar concorrente?
+O processo que está indo para dormir segura
+o bloqueio de condição ou seu próprio
 \lstinline{p->lock} 
-or both from {\it before} it checks the condition
-until {\it after} it is marked \texttt{SLEEPING}.
-The process calling \texttt{wakeup} holds \textit{both}
-locks in \texttt{wakeup}'s loop.
-Thus the waker either makes the condition true before
-the consuming thread checks the condition;
-or the waker's \lstinline{wakeup} examines the sleeping
-thread strictly after it has been marked \texttt{SLEEPING}.
-Then 
+ou ambos desde {\it antes} de verificar a condição
+até {\it depois} de ser marcado como \texttt{SLEEPING}.
+O processo que chama \texttt{wakeup} segura \textit{ambos}
+os bloqueios no loop de \texttt{wakeup}.
+Assim, o despertador ou torna a condição verdadeira antes
+que a thread consumidora verifique a condição;
+ou o \lstinline{wakeup} do despertador examina a thread dormindo
+estritamente depois que ela foi marcada como \texttt{SLEEPING}.
+Então, 
 \lstinline{wakeup}
-will see the sleeping process and wake it up
-(unless something else wakes it up first).
+verá o processo dormindo e o acordará
+(a menos que algo mais o acorde primeiro).
 
-Sometimes multiple processes are sleeping
-on the same channel; for example, more than one process
-reading from a pipe.
-A single call to 
+Às vezes, múltiplos processos estão dormindo
+no mesmo canal; por exemplo, mais de um processo
+lendo de um pipe.
+Uma única chamada para 
 \lstinline{wakeup}
-will wake them all up.
-One of them will run first and acquire the lock that
+acordará todos eles.
+Um deles será executado primeiro e adquirirá o bloqueio com o qual
 \lstinline{sleep}
-was called with, and (in the case of pipes) read whatever
-data is waiting.
-The other processes will find that, despite being woken up,
-there is no data to be read.
-From their point of view the wakeup was ``spurious,'' and
-they must sleep again.
-For this reason \lstinline{sleep} is always called inside a loop that
-checks the condition.
+foi chamado, e (no caso de pipes) lerá qualquer
+dado que estiver esperando.
+Os outros processos descobrirão que, apesar de terem sido acordados,
+não há dados para serem lidos.
+Do ponto de vista deles, o despertar foi "espúrio", e
+eles devem dormir novamente.
+Por essa razão, \lstinline{sleep} é sempre chamado dentro de um loop que
+verifica a condição.
 
-No harm is done if two uses of sleep/wakeup accidentally
-choose the same channel: they will see spurious wakeups,
-but looping as described above will tolerate this problem.
-Much of the charm of sleep/wakeup is that it is both
-lightweight (no need to create special data
-structures to act as sleep channels) and provides a layer
-of indirection (callers need not know which specific process
-they are interacting with).
+Não há problema se duas chamadas de sleep/wakeup acidentalmente
+escolhem o mesmo canal: elas verão despertares espúrios,
+mas o looping conforme descrito acima tolerará esse problema.
+Grande parte do charme de dormir/acordar é que é tanto
+leve (não há necessidade de criar estruturas de dados especiais
+para atuar como canais de espera) quanto fornece uma camada
+de indireção (os chamadores não precisam saber qual processo específico
+estão interagindo).
 %% 
-\section{Code: Pipes}
+\section{Código: Pipes}
 %% 
-A more complex example that uses \lstinline{sleep}
-and \lstinline{wakeup} to synchronize producers and
-consumers is xv6's implementation of pipes.
-We saw the interface for pipes in Chapter~\ref{CH:UNIX}:
-bytes written to one end of a pipe are copied
-to an in-kernel buffer and then can be read from
-the other end of the pipe.
-Future chapters will examine the file descriptor support
-surrounding pipes, but let's look now at the
-implementations of 
+
+Um exemplo mais complexo que usa \lstinline{sleep}
+e \lstinline{wakeup} para sincronizar produtores e
+consumidores é a implementação de pipes do xv6.
+Vimos a interface para pipes no Capítulo~\ref{CH:UNIX}:
+bytes escritos em uma extremidade de um pipe são copiados
+para um buffer no núcleo e, em seguida, podem ser lidos da
+outra extremidade do pipe.
+Capítulos futuros examinarão o suporte a descritores de arquivo
+em torno de pipes, mas vamos olhar agora as
+implementações de 
 \indexcode{pipewrite}
-and
+e
 \indexcode{piperead}.
 
-Each pipe
-is represented by a 
+Cada pipe
+é representado por uma 
 \indexcode{struct pipe},
-which contains
-a 
+que contém
+um 
 \lstinline{lock}
-and a 
+e um 
 \lstinline{data}
 buffer.
-The fields
+Os campos
 \lstinline{nread}
-and
+e
 \lstinline{nwrite}
-count the total number of bytes read from
-and written to the buffer.
-The buffer wraps around:
-the next byte written after
+contam o número total de bytes lidos do
+e escritos no buffer.
+O buffer se envolve:
+o próximo byte escrito após
 \lstinline{buf[PIPESIZE-1]}
-is 
+é 
 \lstinline{buf[0]}.
-The counts do not wrap.
-This convention lets the implementation
-distinguish a full buffer 
+As contagens não se envolvem.
+Essa convenção permite que a implementação
+distinga um buffer cheio 
 (\lstinline{nwrite}
 \lstinline{==}
 \lstinline{nread+PIPESIZE})
-from an empty buffer
+de um buffer vazio
 (\lstinline{nwrite}
 \lstinline{==}
 \lstinline{nread}),
-but it means that indexing into the buffer
-must use
+mas isso significa que a indexação no buffer
+deve usar
 \lstinline{buf[nread}
 \lstinline{%}
 \lstinline{PIPESIZE]}
-instead of just
+em vez de apenas
 \lstinline{buf[nread]} 
-(and similarly for
+(e de forma semelhante para
 \lstinline{nwrite}).
 
-Let's suppose that calls to
+Vamos supor que chamadas para
 \lstinline{piperead}
-and
+e
 \lstinline{pipewrite}
-happen simultaneously on two different CPUs.
-\lstinline{pipewrite}
-begins by acquiring the pipe's lock, which
-protects the counts, the data, and their
-associated invariants.
+ocorram simultaneamente em duas CPUs diferentes.
+A \lstinline{pipewrite} \lineref{kernel/pipe.c:/^pipewrite/}
+começa adquirindo o bloqueio do pipe, que
+protege as contagens, os dados e suas
+invariantes associadas.
+A \lstinline{piperead} \lineref{kernel/pipe.c:/^piperead/}
+então tenta adquirir o bloqueio também, mas não consegue.
+Ela gira em
+\lstinline{acquire} \lineref{kernel/spinlock.c:/^acquire/}
+esperando pelo bloqueio.
+Enquanto
 \lstinline{piperead}
-then tries to acquire the lock too, but cannot.
-It spins in
-\lstinline{acquire}
-waiting for the lock.
-While
-\lstinline{piperead}
-waits,
+espera,
 \lstinline{pipewrite}
-loops over the bytes being written
+percorre os bytes que estão sendo escritos
 (\lstinline{addr[0..n-1]}),
-adding each to the pipe in turn
-During this loop, it could happen that
-the buffer fills
-In this case, 
-\lstinline{pipewrite}
-calls
+adicionando cada um ao pipe em sequência
+\lineref{kernel/pipe.c:/nwrite\+\+/}.
+Durante esse loop, pode acontecer que
+o buffer se encha
+\lineref{kernel/pipe.c:/DOC: pipewrite-full/}.
+Nesse caso, 
+a \lstinline{pipewrite}
+chama
 \lstinline{wakeup}
-to alert any sleeping readers to the fact
-that there is data waiting in the buffer
-and then sleeps on
+para alertar quaisquer leitores em espera sobre o fato
+de que há dados esperando no buffer
+e então dorme em
 \lstinline{&pi->nwrite}
-to wait for a reader to take some bytes
-out of the buffer.
-\lstinline{sleep}
-releases 
-the pipe's lock
-as part of putting
-\lstinline{pipewrite}'s
-process to sleep.
+para esperar que um leitor retire alguns bytes
+do buffer.
+A \lstinline{sleep}
+libera 
+o bloqueio do pipe
+como parte de colocar o
+processo da \lstinline{pipewrite} para dormir.
 
-\lstinline{piperead}
-now acquires the pipe's lock and enters its critical section:
-it finds that
+A \lstinline{piperead}
+agora adquire o bloqueio do pipe e entra em sua seção crítica:
+ela descobre que
 \lstinline{pi->nread}
 \lstinline{!=}
 \lstinline{pi->nwrite}
-(\lstinline{pipewrite}
-went to sleep because
+\lineref{kernel/pipe.c:/DOC: pipe-empty/}
+(a \lstinline{pipewrite}
+foi dormir porque
 \lstinline{pi->nwrite}
 \lstinline{==}
 \lstinline{pi->nread}
 \lstinline{+}
 \lstinline{PIPESIZE}
-so it falls through to the 
-\lstinline{for}
-loop, copies data out of the pipe
-and increments 
+\lineref{kernel/pipe.c:/pipewrite-full/}),
+então ela cai no 
+loop \lstinline{for}, copia os dados do pipe
+\lineref{kernel/pipe.c:/DOC: piperead-copy/},
+e incrementa 
 \lstinline{nread}
-by the number of bytes copied.
-That many bytes are now available for writing, so
-\lstinline{piperead}
-calls
+pelo número de bytes copiados.
+Esse número de bytes agora está disponível para escrita, então
+a \lstinline{piperead}
+chama
 \lstinline{wakeup}
-to wake any sleeping writers
-before it returns.
-\lstinline{wakeup}
-finds a process sleeping on
+\lineref{kernel/pipe.c:/DOC: piperead-wakeup/}
+para acordar quaisquer escritores em espera
+antes de retornar.
+A \lstinline{wakeup}
+encontra um processo dormindo em
 \lstinline{&pi->nwrite},
-the process that was running
+o processo que estava executando
 \lstinline{pipewrite}
-but stopped when the buffer filled.
-It marks that process as
+mas parou quando o buffer se encheu.
+Ela marca esse processo como
 \indexcode{RUNNABLE}.
 
-The pipe code uses separate sleep channels for reader and writer
+O código do pipe usa canais de sono separados para o leitor e o escritor
 (\lstinline{pi->nread}
-and
+e
 \lstinline{pi->nwrite});
-this might make the system more efficient in the unlikely
-event that there are lots of
-readers and writers waiting for the same pipe.
-The pipe code sleeps inside a loop checking the
-sleep condition; if there are multiple readers
-or writers, all but the first process to wake up
-will see the condition is still false and sleep again.
+isso pode tornar o sistema mais eficiente no improvável
+evento de que haja muitos
+leitores e escritores esperando pelo mesmo pipe.
+O código do pipe dorme dentro de um loop verificando a
+condição de sono; se houver múltiplos leitores
+ou escritores, todos, exceto o primeiro processo a acordar
+verão que a condição ainda é falsa e dormirão novamente.
 %% 
-\section{Code: Wait, exit, and kill}
+\section{Código: Esperar, Sair e Matar}
 %% 
+
+As funções \lstinline{sleep} e \lstinline{wakeup}
+podem ser usadas para muitos tipos de espera.
+Um exemplo interessante, introduzido no Capítulo~\ref{CH:UNIX},
+é a interação entre a \indexcode{exit} de um filho
+e a \indexcode{wait} de seu pai.
+No momento da morte do filho, o pai pode já
+estar dormindo em {\tt wait}, ou pode estar fazendo outra coisa;
+neste último caso, uma chamada subsequente para {\tt wait} deve
+observar a morte do filho, talvez muito tempo depois de chamar {\tt exit}.
+A maneira como o xv6 registra a morte do filho até que {\tt wait}
+a observe é que {\tt exit} coloca o chamador no estado \indexcode{ZOMBIE},
+onde permanece até que o {\tt wait} do pai o note, mude
+o estado do filho para {\tt UNUSED}, copie o status de saída do filho,
+e retorne o ID do processo do filho ao pai.
+Se o pai sair antes do filho, o 
+pai entrega o filho ao
+processo \lstinline{init}, que chama perpetuamente {\tt wait};
+assim, cada filho tem um pai para limpar após ele.
+Um desafio é
+evitar condições de corrida e deadlock entre
+as chamadas simultâneas de \lstinline{wait}
+e \lstinline{exit} do pai e do filho,
+bem como chamadas simultâneas de
+\lstinline{exit} e \lstinline{exit}.
+
+A \lstinline{wait} começa adquirindo
+\lstinline{wait_lock} \lineref{kernel/proc.c:/^wait/},
+que atua como o bloqueio de condição
+que ajuda a garantir que \lstinline{wait} não perca um \lstinline{wakeup}
+de um filho que está saindo.
+Em seguida, a \lstinline{wait} escaneia a tabela de processos.
+Se encontrar um filho no estado \texttt{ZOMBIE},
+ela libera os recursos desse filho e
+sua estrutura \lstinline{proc}, copia
+o status de saída do filho para o endereço fornecido à \lstinline{wait}
+(se não for 0),
+e retorna o ID do processo do filho.
+Se 
+a \lstinline{wait}
+encontrar filhos, mas nenhum tiver saído,
+ela chama
 \lstinline{sleep}
-and
+para esperar que algum deles saia
+\lineref{kernel/proc.c:/DOC: wait-sleep/},
+e depois escaneia novamente.
+A \lstinline{wait} frequentemente segura dois bloqueios,
+\lstinline{wait_lock} e o \lstinline{pp->lock} de algum processo;
+a ordem para evitar deadlock é primeiro \lstinline{wait_lock}
+e depois \lstinline{pp->lock}.
+
+A \lstinline{exit} \lineref{kernel/proc.c:/^exit/} registra o status de saída,
+libera alguns recursos, chama \lstinline{reparent} para dar seus
+filhos ao processo \lstinline{init}, acorda o pai caso
+ele esteja em \lstinline{wait}, marca o chamador como um zumbi, e
+cede permanentemente a CPU. A \lstinline{exit} segura tanto
+\lstinline{wait_lock} quanto \lstinline{p->lock} durante essa
+sequência.
+Ela segura \lstinline{wait_lock} porque 
+é o bloqueio de condição
+para o \lstinline{wakeup(p->parent)}, impedindo que um pai em
+\lstinline{wait} perca o despertar. A \lstinline{exit} deve segurar
+\lstinline{p->lock} também, para impedir que um pai em
+\lstinline{wait} veja que o filho está no estado
+\lstinline{ZOMBIE} antes que o filho tenha finalmente chamado
+\lstinline{swtch}. A \lstinline{exit} adquire esses bloqueios na
+mesma ordem que a \lstinline{wait} para evitar deadlock.
+
+Pode parecer incorreto que a \lstinline{exit} acorde o pai
+antes de definir seu estado como \lstinline{ZOMBIE}, 
+mas isso é seguro:
+embora
 \lstinline{wakeup}
-can be used for many kinds of waiting.
-An interesting example, introduced in Chapter~\ref{CH:UNIX},
-is the interaction between a child's \indexcode{exit}
-and its parent's \indexcode{wait}.
-At the time of the child's death, the parent may already
-be sleeping in {\tt wait}, or may be doing something else;
-in the latter case, a subsequent call to {\tt wait} must
-observe the child's death, perhaps long after it calls {\tt exit}.
-The way that xv6 records the child's demise until {\tt wait}
-observes it is for {\tt exit} to put the caller into the \indexcode{ZOMBIE}
-state, where it stays until the parent's {\tt wait} notices it, changes
-the child's state to {\tt UNUSED}, copies the child's exit status,
-and returns the child's process ID to the parent.
-If the parent exits before the child, the 
-parent gives the child to the
-\lstinline{init}
-process, which perpetually calls {\tt wait};
-thus
-every child has a parent to clean up after it.
-A challenge is
-to avoid races and deadlock between
-simultaneous parent and child
+possa fazer o pai rodar,
+o loop em
 \lstinline{wait}
-and
-\lstinline{exit},
-as well as simultaneous
-\lstinline{exit} and \lstinline{exit}.
-
-\lstinline{wait} starts by acquiring
-\lstinline{wait_lock}
-which acts as the condition
-lock that helps ensure that \lstinline{wait} doesn't miss a \lstinline{wakeup}
-from an exiting child.
-Then \lstinline{wait} scans the process table.
-If it finds a child in \texttt{ZOMBIE} state,
-it frees that child's resources and
-its \lstinline{proc} structure, copies
-the child's exit status to the address supplied to \lstinline{wait}
-(if it is not 0),
-and returns the child's process ID.
-If 
-\lstinline{wait}
-finds children but none have exited,
-it calls
-\lstinline{sleep}
-to wait for any of them to exit
-then scans again.
-\lstinline{wait} often holds two locks,
-\lstinline{wait_lock} and some process's \lstinline{pp->lock};
-the deadlock-avoiding order is first \lstinline{wait_lock}
-and then \lstinline{pp->lock}.
-
-status, frees some resources, calls \lstinline{reparent} to give its
-children to the \lstinline{init} process, wakes up the parent in case
-it is in \lstinline{wait}, marks the caller as a zombie, and
-permanently yields the CPU. \lstinline{exit} holds both
-\lstinline{wait_lock} and \lstinline{p->lock} during this
-sequence.
-It holds \lstinline{wait_lock} because 
-it's the condition
-lock for the \lstinline{wakeup(p->parent)}, preventing a parent in
-\lstinline{wait} from losing the wakeup. \lstinline{exit} must hold
-\lstinline{p->lock} for this sequence also, to prevent a parent in
-\lstinline{wait} from seeing that the child is in state
-\lstinline{ZOMBIE} before the child has finally called
-\lstinline{swtch}. \lstinline{exit} acquires these locks in
-the same order as \lstinline{wait} to avoid deadlock.
-
-It may look incorrect for \lstinline{exit} to wake up the parent
-before setting its state to \lstinline{ZOMBIE}, 
-but that is safe:
-although
-\lstinline{wakeup}
-may cause the parent to run,
-the loop in
-\lstinline{wait}
-cannot examine the child until the child's
-\lstinline{p->lock}
-is released by {\tt scheduler},
-so
-\lstinline{wait}
-can't look at
-the exiting process until well after
-\lstinline{exit}
-has set its state to
+não pode examinar o filho até que o
+\lstinline{p->lock} do filho
+seja liberado pelo {\tt scheduler},
+então
+a \lstinline{wait}
+não pode olhar para
+o processo que está saindo até muito depois de
+a \lstinline{exit}
+ter definido seu estado como
 \lstinline{ZOMBIE}
+\lineref{kernel/proc.c:/state.=.ZOMBIE/}.
 
-While
+Enquanto a
 \lstinline{exit} 
-allows a process to terminate itself,
+permite que um processo termine a si mesmo,
+a \lstinline{kill} \lineref{kernel/proc.c:/^kill/} 
+permite que um processo solicite que outro termine.
+Seria muito complexo para a
 \lstinline{kill}
-lets one process request that another terminate.
-It would be too complex for
-\lstinline{kill}
-to directly destroy the victim process, since the victim
-might be executing on another CPU, perhaps
-in the middle of a sensitive sequence of updates to kernel data structures.
-Thus
-\lstinline{kill}
-does very little: it just sets the victim's
-\indexcode{p->killed}
-and, if it is sleeping, wakes it up.
-Eventually the victim will enter or leave the kernel,
-at which point code in
+destruir diretamente o processo vítima, uma vez que a vítima
+pode estar executando em outra CPU, talvez
+no meio de uma sequência sensível de atualizações nas estruturas de dados do núcleo.
+Assim,
+a \lstinline{kill}
+faz muito pouco: apenas define o
+\indexcode{p->killed} da vítima
+e, se estiver dormindo, a acorda.
+Eventualmente, a vítima entrará ou sairá do núcleo,
+momento em que o código em
 \lstinline{usertrap}
-will call
+chamará
 \lstinline{exit}
-if
+se
 \lstinline{p->killed}
-is set
-(it checks by calling
+estiver definido
+(verifica chamando
 \lstinline{killed}
-If the victim is running in user space, it will soon enter
-the kernel by making a system call or because the timer (or
-some other device) interrupts.
+\lineref{kernel/proc.c:/^killed/}).
+Se a vítima estiver executando no espaço do usuário, ela logo entrará
+no núcleo fazendo uma chamada de sistema ou porque o timer (ou
+algum outro dispositivo) interrompe.
 
-If the victim process is in
+Se o processo vítima estiver em
 \lstinline{sleep},
-\lstinline{kill}'s call to
+a chamada da \lstinline{kill} para
 \lstinline{wakeup}
-will cause the victim to return from
+fará com que a vítima retorne de
 \lstinline{sleep}.
-This is potentially dangerous because 
-the condition being waited for for may not be true.
-However, xv6 calls to
+Isso é potencialmente perigoso porque 
+a condição que está sendo esperada pode não ser verdadeira.
+No entanto, as chamadas do xv6 para
 \lstinline{sleep}
-are always wrapped in a
-\lstinline{while}
-loop that re-tests the condition after
+são sempre envolvidas em um
+loop \lstinline{while}
+que re-testa a condição após
 \lstinline{sleep}
-returns.
-Some calls to
+retornar.
+Algumas chamadas para
 \lstinline{sleep}
-also test
+também testam
 \lstinline{p->killed}
-in the loop, and abandon the current activity if it is set.
-This is only done when such abandonment would be correct.
-For example, the pipe read and write code
-returns if the killed flag is set; eventually the
-code will return back to trap, which will again
-check \lstinline{p->killed} and exit.
+no loop, e abandonam a atividade atual se estiver definido.
+Isso é feito apenas quando tal abandono seria correto.
+Por exemplo, o código de leitura e escrita de pipes
+\lineref{kernel/pipe.c:/killed.pr/} 
+retorna se a flag de morte estiver definida; eventualmente, o
+código retornará ao trap, que novamente
+verificará \lstinline{p->killed} e sairá.
 
-Some xv6 
+Alguns loops de 
 \lstinline{sleep}
-loops do not check
+do xv6 não verificam
 \lstinline{p->killed} 
-because the code is in the middle of a multi-step
-system call that should be atomic.
-The virtio driver
-is an example: it does not check
+porque o código está no meio de uma chamada de sistema de múltiplos passos
+que deve ser atômica.
+O driver virtio
+\lineref{kernel/virtio\_disk.c:/sleep.b/} 
+é um exemplo: ele não verifica
 \lstinline{p->killed}
-because a disk operation may be one of a set of
-writes that are all needed in order for the file system to
-be left in a correct state.
-A process that is killed while waiting for disk I/O won't
-exit until it completes the current system call and
-\lstinline{usertrap} sees the killed flag.
+porque uma operação de disco pode ser uma das várias
+escritas que são todas necessárias para que o sistema de arquivos
+fique em um estado correto.
+Um processo que é morto enquanto aguarda I/O de disco não
+sairá até completar a chamada de sistema atual e
+\lstinline{usertrap} vê a flag de morte.
 
-\section{Process Locking}
+\section{Bloqueio de Processos}
 
-The lock associated with each process (\lstinline{p->lock}) is the
-most complex lock in xv6.
-A simple way to think about \lstinline{p->lock} is
-that it must be held while reading or writing any of the following
-\lstinline{struct proc} fields:
+O bloqueio associado a cada processo (\lstinline{p->lock}) é o
+bloqueio mais complexo do xv6.
+Uma maneira simples de pensar sobre \lstinline{p->lock} é
+que ele deve ser mantido ao ler ou escrever qualquer um dos seguintes
+campos da \lstinline{struct proc}:
 \lstinline{p->state},
 \lstinline{p->chan},
 \lstinline{p->killed},
 \lstinline{p->xstate},
-and
+e
 \lstinline{p->pid}.
-These fields can be used by other processes, or by scheduler
-threads on other CPUs, so it's natural that they
-must be protected by a lock.
+Esses campos podem ser usados por outros processos, ou por threads do escalonador
+em outras CPUs, então é natural que eles
+devam ser protegidos por um bloqueio.
 
-However, most uses of \lstinline{p->lock} are protecting higher-level
-aspects of xv6's process data structures and algorithms. Here's
-the full set of things that \lstinline{p->lock} does:
-
-% it's hard to know how to phrase these things in a uniform way.
-% should the discussion be about invariants? protecting data? avoiding
-% races? ensuring atomicity? avoiding a specific danger?
-
-% the "atomic" phrasing often doesn't really say what the danger is.
+No entanto, a maioria dos usos de \lstinline{p->lock} protege aspectos de nível superior
+das estruturas de dados e algoritmos de processo do xv6. Aqui está
+o conjunto completo de coisas que \lstinline{p->lock} faz:
 
 \begin{itemize}
 
-\item Along with \lstinline{p->state}, it prevents races in allocating
-  \lstinline{proc[]} slots for new processes.
-% makes check for UNUSED atomic with allocation (or something).
+\item Juntamente com \lstinline{p->state}, impede condições de corrida na alocação
+  de slots \lstinline{proc[]} para novos processos.
 
-\item It conceals a process from view while it is being created
-or destroyed.
-% makes all the steps of allocation, and destruction, atomic.
+\item Oculta um processo de vista enquanto está sendo criado
+ou destruído.
 
-\item It prevents a parent's \lstinline{wait} from collecting a
-process that has set its state to \lstinline{ZOMBIE} but has
-not yet yielded the CPU.
-% it atomicizes the setting of the state to ZOMIE and the yielding
-% of the CPU.
+\item Impede que o \lstinline{wait} de um pai colete um
+processo que definiu seu estado como \lstinline{ZOMBIE} mas não
+cedeu ainda a CPU.
 
-\item It prevents another CPU's scheduler from deciding to run
-a yielding process after it sets its state to \lstinline{RUNNABLE} but
-before it finishes \lstinline{swtch}.
-% it atomizes the setting of p->state and swtch().
+\item Impede que o escalonador de outra CPU decida executar
+um processo que está cedendo após definir seu estado como \lstinline{RUNNABLE} mas
+antes de terminar \lstinline{swtch}.
 
-\item It ensures that only one CPU's scheduler decides to run a
-  \lstinline{RUNNABLE} processes.
-% it atomicizes a scheduler's check for RUNNABLE and actually
-% running the process. or setting state to RUNNING.
+\item Garante que apenas o escalonador de uma CPU decida executar um
+  processo \lstinline{RUNNABLE}.
 
-\item It prevents a timer interrupt from causing a process to
-yield while it is in \lstinline{swtch}.
-% it makes swtch (or really the whole sequence) atomic w.r.t. timer interrupts
+\item Impede que uma interrupção de timer faça um processo
+ceder enquanto está em \lstinline{swtch}.
 
-\item Along with the condition lock, it helps prevent \lstinline{wakeup}
-from overlooking a process that is calling \lstinline{sleep} but has not
-finished yielding the CPU.
-% avoids a race between conditionCheck+sleep and wakeup?
-% makes condition check atomic with yield?
+\item Juntamente com o bloqueio de condição, ajuda a evitar que \lstinline{wakeup}
+esqueça um processo que está chamando \lstinline{sleep} mas não terminou
+de ceder a CPU.
 
-\item It prevents the victim process of \lstinline{kill} from exiting
-and perhaps being re-allocated between \lstinline{kill}'s check of 
-\lstinline{p->pid} and setting \lstinline{p->killed}.
-% it makes the pid check atomic with setting killed.
+\item Impede que o processo vítima da \lstinline{kill} saia
+e talvez seja realocado entre a verificação de 
+\lstinline{kill} do 
+\lstinline{p->pid} e a definição de \lstinline{p->killed}.
 
-\item It makes \lstinline{kill}'s check and write of \lstinline{p->state}
-atomic.
+\item Torna a verificação e a escrita da \lstinline{p->state} atômicas.
 
 \end{itemize}
 
-
-The \lstinline{p->parent} field is protected by the global lock
-\lstinline{wait_lock} rather than by \lstinline{p->lock}.
-Only a process's parent modifies \lstinline{p->parent}, though
-the field is read both by the process itself and by other
-processes searching for their children. The purpose of 
-\lstinline{wait_lock} is to act as the condition lock when
-\lstinline{wait} sleeps waiting for any child to exit. An
-exiting child holds either \lstinline{wait_lock} or \lstinline{p->lock}
-until after it has set its state to \lstinline{ZOMBIE}, woken
-up its parent, and yielded the CPU. \lstinline{wait_lock} also
-serializes concurrent \lstinline{exit}s by a parent and child,
-so that the \lstinline{init} process (which inherits the child)
-is guaranteed to be woken up from its \lstinline{wait}.
-\lstinline{wait_lock} is a global lock rather than a per-process
-lock in each parent, because, until a process acquires it,
-it cannot know who its parent is.
+O campo \lstinline{p->parent} é protegido pelo bloqueio global
+\lstinline{wait_lock} em vez de por \lstinline{p->lock}.
+Apenas o pai de um processo modifica \lstinline{p->parent}, embora
+o campo seja lido tanto pelo próprio processo quanto por outros
+processos que buscam seus filhos. O propósito de 
+\lstinline{wait_lock} é atuar como o bloqueio de condição quando
+\lstinline{wait} dorme esperando que algum filho saia. Um
+filho que está saindo segura seja \lstinline{wait_lock} ou \lstinline{p->lock}
+até depois que tenha definido seu estado como \lstinline{ZOMBIE}, acordado
+seu pai e cedido a CPU. O \lstinline{wait_lock} também
+serializa chamadas simultâneas de \lstinline{exit} por um pai e um filho,
+de modo que o processo \lstinline{init} (que herda o filho)
+é garantido ser acordado de seu \lstinline{wait}.
+O \lstinline{wait_lock} é um bloqueio global em vez de um bloqueio por processo
+em cada pai, porque, até que um processo o adquira,
+não pode saber quem é seu pai.
 
 %% 
-\section{Real world}
+\section{Mundo Real}
 %% 
 
-The xv6 scheduler implements a simple scheduling policy, which runs each process
-in turn.  This policy is called
+O escalonador do xv6 implementa uma política de escalonamento simples, que executa cada processo
+em turnos. Essa política é chamada de
 \indextext{round robin}.
-Real operating systems implement more sophisticated policies that, for example,
-allow processes to have priorities.  The idea is that a runnable high-priority process
-will be preferred by the scheduler over a runnable low-priority process.   These
-policies can become complex quickly because there are often competing goals: for
-example, the operating system might also want to guarantee fairness and
-high throughput.  In addition, complex policies may lead to unintended
-interactions such as
-\indextext{priority inversion}
-and 
+Sistemas operacionais reais implementam políticas mais sofisticadas que, por exemplo,
+permitem que os processos tenham prioridades. A ideia é que um processo de alta prioridade
+executável será preferido pelo escalonador em relação a um processo de baixa prioridade que também
+está executável. Essas
+políticas podem se tornar complexas rapidamente porque há frequentemente objetivos em competição: por
+exemplo, o sistema operacional também pode querer garantir justiça e
+alta taxa de transferência. Além disso, políticas complexas podem levar a interações não intencionais, como
+\indextext{inversão de prioridade}
+e 
 \indextext{convoys}.
-Priority inversion can happen when a low-priority and high-priority process
-both use a particular lock, which when acquired by the low-priority process can prevent the
-high-priority process from making progress.  A long convoy of waiting processes
-can form when many
-high-priority processes are waiting for a low-priority process that acquires a
-shared lock; once a convoy has formed it can persist for long time.
-To avoid these kinds of problems additional mechanisms are necessary in
-sophisticated schedulers.
+A inversão de prioridade pode ocorrer quando um processo de baixa prioridade e um processo de alta prioridade
+ambos usam um determinado bloqueio, que, quando adquirido pelo processo de baixa prioridade, pode impedir o
+processo de alta prioridade de progredir. Um longo convoy de processos que estão esperando
+pode se formar quando muitos
+processos de alta prioridade estão esperando por um processo de baixa prioridade que adquire um
+bloqueio compartilhado; uma vez que um convoy se forma, ele pode persistir por muito tempo.
+Para evitar esses tipos de problemas, mecanismos adicionais são necessários em
+escalonadores sofisticados.
 
-\lstinline{sleep}
-and
-\lstinline{wakeup}
-are a simple and effective synchronization method,
-but there are many others.
-The first challenge in all of them is to
-avoid the ``lost wakeups'' problem we saw at the
-beginning of the chapter.
-The original Unix kernel's
-\lstinline{sleep}
-simply disabled interrupts,
-which sufficed because Unix ran on a single-CPU system.
-Because xv6 runs on multiprocessors,
-it adds an explicit lock to
+As funções \lstinline{sleep} e \lstinline{wakeup}
+são um método de sincronização simples e eficaz,
+mas existem muitos outros.
+O primeiro desafio em todos eles é
+evitar o problema de "perda de despertadores" que vimos no
+início do capítulo.
+O \lstinline{sleep} do núcleo Unix original
+simplesmente desabilitava interrupções,
+o que era suficiente porque o Unix rodava em um sistema com um único CPU.
+Como o xv6 roda em multiprocessadores,
+ele adiciona um bloqueio explícito ao
 \lstinline{sleep}.
-FreeBSD's
-\lstinline{msleep}
-takes the same approach.
-Plan 9's 
-\lstinline{sleep}
-uses a callback function that runs with the scheduling
-lock held just before going to sleep;
-the function serves as a last-minute check
-of the sleep condition, to avoid lost wakeups.
-The Linux kernel's
-\lstinline{sleep}
-uses an explicit process queue, called a wait queue, instead of
-a wait channel; the queue has its own internal lock.
+O \lstinline{msleep} do FreeBSD
+adota a mesma abordagem.
+O \lstinline{sleep} do Plan 9
+usa uma função de callback que é executada com o bloqueio de escalonamento
+mantido logo antes de ir para o sono;
+a função serve como uma verificação de última hora
+da condição de sono, para evitar perdas de despertadores.
+O \lstinline{sleep} do núcleo Linux
+usa uma fila de processos explícita, chamada de fila de espera, em vez de
+um canal de espera; a fila tem seu próprio bloqueio interno.
 
-Scanning the entire set of processes in
+Escanear todo o conjunto de processos em
 \lstinline{wakeup}
-is inefficient.  A better solution is to
-replace the
+é ineficiente. Uma solução melhor é
+substituir o
 \lstinline{chan}
-in both
+em ambos
 \lstinline{sleep}
-and
+e
 \lstinline{wakeup}
-with a data structure that holds
-a list of processes sleeping on that structure,
-such as Linux's wait queue.
-Plan 9's
+por uma estrutura de dados que mantenha
+uma lista de processos dormindo nessa estrutura,
+como a fila de espera do Linux.
+O \lstinline{sleep} e
+\lstinline{wakeup} do Plan 9
+chamam essa estrutura de ponto de encontro.
+Muitas bibliotecas de threads se referem à mesma
+estrutura como uma variável de condição;
+nesse contexto, as operações
 \lstinline{sleep}
-and
+e
 \lstinline{wakeup}
-call that structure a rendezvous point.
-Many thread libraries refer to the same
-structure as a condition variable;
-in that context, the operations
-\lstinline{sleep}
-and
-\lstinline{wakeup}
-are called
+são chamadas de
 \lstinline{wait}
-and
+e
 \lstinline{signal}.
-All of these mechanisms share the same
-flavor: the sleep condition is protected by
-some kind of lock dropped atomically during sleep.
+Todos esses mecanismos compartilham o mesmo
+sabor: a condição de sono é protegida por
+algum tipo de bloqueio que é liberado atômica e durante o sono.
 
-The implementation of
+A implementação de
 \lstinline{wakeup}
-wakes up all processes that are waiting on a particular channel, and it might be
-the case that many processes are waiting for that particular channel.   The
-operating system will schedule all these processes and they will race to check
-the sleep condition.  Processes that behave in this way are sometimes called a
-\indextext{thundering herd},
-and it is best avoided.
-Most condition variables have two primitives for
+acorda todos os processos que estão esperando em um determinado canal, e pode ser
+o caso de que muitos processos estejam esperando por aquele canal específico. O
+sistema operacional escalonará todos esses processos e eles competirão para verificar
+a condição de sono. Processos que se comportam dessa maneira são às vezes chamados de
+\indextext{manada trovejante},
+e é melhor evitá-los.
+A maioria das variáveis de condição possui duas primitivas para
 \lstinline{wakeup}:
 \lstinline{signal},
-which wakes up one process, and
+que acorda um processo, e
 \lstinline{broadcast},
-which wakes up all waiting processes.
+que acorda todos os processos em espera.
 
-Semaphores are often used for synchronization.
-The count typically corresponds to something like
-the number of bytes available in a pipe buffer
-or the number of zombie children that a process has.
-Using an explicit count as part of the abstraction
-avoids the ``lost wakeup'' problem:
-there is an explicit count of the number
-of wakeups that have occurred.
-The count also avoids the spurious wakeup
-and thundering herd problems.
+Semáforos são frequentemente usados para sincronização.
+A contagem geralmente corresponde a algo como
+o número de bytes disponíveis em um buffer de pipe
+ou o número de filhos zumbis que um processo possui.
+Usar uma contagem explícita como parte da abstração
+evita o problema de "perda de despertador":
+existe uma contagem explícita do número
+de despertadores que ocorreram.
+A contagem também evita o despertar espúrio
+e os problemas da manada trovejante.
 
-Terminating processes and cleaning them up introduces much complexity in xv6.
-In most operating systems it is even more complex, because, for example, the
-victim process may be deep inside the kernel sleeping, and unwinding its
-stack requires care, since each function on the call stack
-may need to do some clean-up.  Some languages help out by providing
-an exception mechanism, but not C.
-Furthermore, there are other events that can cause a sleeping process to be
-woken up, even though the event it is waiting for has not happened yet.  For
-example, when a Unix process is sleeping, another process may send a 
+Terminar processos e limpá-los introduz muita complexidade no xv6.
+Em a maioria dos sistemas operacionais, é ainda mais complexo, porque, por exemplo, o
+processo vítima pode estar profundamente dentro do núcleo dormindo, e desfazer sua
+pilha requer cuidado, uma vez que cada função na pilha de chamadas
+pode precisar fazer alguma limpeza. Algumas linguagens ajudam fornecendo
+um mecanismo de exceção, mas não C.
+Além disso, existem outros eventos que podem fazer um processo que está
+dormindo ser acordado, mesmo que o evento que está esperando ainda não tenha ocorrido. Por
+exemplo, quando um processo Unix está dormindo, outro processo pode enviar um 
 \indexcode{signal}
-to it.  In this case, the
-process will return from the interrupted system call with the value -1 and with
-the error code set to EINTR. The application can check for these values and
-decide what to do.  Xv6 doesn't support signals and this complexity doesn't arise.
+para ele. Nesse caso, o
+processo retornará da chamada de sistema interrompida com o valor -1 e com
+o código de erro definido como EINTR. A aplicação pode verificar esses valores e
+decidir o que fazer. O xv6 não suporta sinais e essa complexidade não surge.
 
-Xv6's support for
+O suporte do xv6 para
 \lstinline{kill}
-is not entirely satisfactory: there are sleep loops
-which probably should check for
+não é totalmente satisfatório: existem loops de sono
+que provavelmente deveriam verificar
 \lstinline{p->killed}.
-A related problem is that, even for 
-\lstinline{sleep}
-loops that check
+Um problema relacionado é que, mesmo para 
+loops de \lstinline{sleep}
+que verificam
 \lstinline{p->killed},
-there is a race between 
+existe uma condição de corrida entre 
 \lstinline{sleep}
-and
+e
 \lstinline{kill};
-the latter may set
+o último pode definir
 \lstinline{p->killed}
-and try to wake up the victim just after the victim's loop
-checks
+e tentar acordar a vítima logo após o loop da vítima
+verificar
 \lstinline{p->killed}
-but before it calls
+mas antes de chamar
 \lstinline{sleep}.
-If this problem occurs, the victim won't notice the
+Se esse problema ocorrer, a vítima não notará a
 \lstinline{p->killed}
-until the condition it is waiting for occurs. This may be quite a bit later
-or even never
-(e.g., if the victim is waiting for input from the console, but the user
-doesn't type any input).
+até que a condição pela qual está esperando ocorra. Isso pode ser bastante mais tarde
+ou até nunca
+(por exemplo, se a vítima estiver aguardando entrada do console, mas o usuário
+não digitar nenhuma entrada).
 
-A real operating system would find free
-\lstinline{proc}
-structures with an explicit free list
-in constant time instead of the linear-time search in
+Um sistema operacional real encontraria estruturas
+\lstinline{proc} livres com uma lista de livres explícita
+em tempo constante em vez da busca em tempo linear em
 \lstinline{allocproc};
-xv6 uses the linear scan for simplicity.
+o xv6 usa a varredura linear por simplicidade.
 %% 
-\section{Exercises}
+\section{Exercícios}
 %% 
 
 \begin{enumerate}
 
-\item Implement semaphores in xv6 without using
-\lstinline{sleep} and \lstinline{wakeup} (but it
-is OK to use spin locks).
-Choose a few of xv6's uses of sleep and wakeup and
-replace them with semaphores.
-Judge the result.
+\item Implemente semáforos no xv6 sem usar
+\lstinline{sleep} e \lstinline{wakeup} (mas
+é permitido usar bloqueios ocupados).
+Escolha alguns dos usos de xv6 de sleep e wakeup e
+substitua-os por semáforos.
+Avalie o resultado.
 
-\item Fix the race mentioned above between
+\item Corrija a condição de corrida mencionada acima entre
 \lstinline{kill}
-and 
+e 
 \lstinline{sleep},
-so that a
+para que um
 \lstinline{kill}
-that occurs after the victim's sleep loop checks
+que ocorre após o loop de sono da vítima verificar
 \lstinline{p->killed}
-but before it calls
+mas antes de chamar
 \lstinline{sleep}
-results in the victim abandoning the current system call.
-% Answer: a solution is to check in sleep if p->killed is set before setting
-% the processes's state to sleep. 
+resulta na vítima abandonando a chamada de sistema atual.
 
-\item Design a plan so that every sleep loop checks 
+\item Desenhe um plano para que cada loop de sono verifique 
 \lstinline{p->killed}
-so that, for example, a process that is in the virtio driver can return quickly from the while loop
-if it is killed by another process.
-% Answer: this is difficult.  Moderns Unixes do this with setjmp and longjmp and very carefully programming to clean any partial state that the interrupted systems call may have built up.
+para que, por exemplo, um processo que está no driver virtio possa retornar rapidamente do loop
+se for morto por outro processo.
 
-\item Modify xv6 to use only one context switch when switching from
-  one process's kernel thread to another, rather than switching
-  through the scheduler thread. The yielding thread will need to select
-  the next thread itself and call \texttt{swtch}. The challenges will
-  be to prevent multiple CPUs from executing the same thread accidentally;
-  to get the locking right; and to avoid deadlocks.
+\item Modifique o xv6 para usar apenas uma troca de contexto ao mudar de
+  uma thread de núcleo de um processo para outra, em vez de passar
+  pelo thread do escalonador. A thread que cede precisará selecionar
+  a próxima thread por conta própria e chamar \texttt{swtch}. Os desafios serão
+  evitar que múltiplas CPUs executem a mesma thread acidentalmente;
+  acertar o bloqueio; e evitar deadlocks.
 
-\item Modify xv6's
-\lstinline{scheduler}
-to use the
+\item Modifique o \lstinline{scheduler} do xv6
+para usar a instrução
 RISC-V
 \lstinline{WFI}
-(wait for interrupt)
-instruction
-when no processes are runnable.
-Try to ensure that, any time there are runnable processes waiting
-to run, no CPUs are pausing in \texttt{WFI}.
+(esperar por interrupção)
+quando não houver processos executáveis.
+Tente garantir que, sempre que houver processos executáveis esperando
+para rodar, nenhuma CPU esteja pausando em \texttt{WFI}.
 
 \end{enumerate}
