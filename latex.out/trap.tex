@@ -1,687 +1,682 @@
-%    Sidebar about panic:
-% 	panic is the kernel's last resort: the impossible has happened and the
-% 	kernel does not know how to proceed.  In xv6, panic does ...
-\chapter{Traps and system calls}
+%    Nota lateral sobre panic:
+% 	panic é o último recurso do kernel: o impossível aconteceu e o
+% 	kernel não sabe como proceder. No xv6, panic faz ...
+\chapter{Traps e chamadas de sistema}
 \label{CH:TRAP}
 
-There are three kinds of event which cause the CPU to set
-aside ordinary execution of instructions and force a
-transfer of control to special code that handles the event. One
-situation is a system call, when a user program 
-executes the {\tt ecall} instruction to ask the kernel to do 
-something for it. Another situation is an \indextext{exception}:
-an instruction (user or kernel) does something illegal, such as divide
-by zero or use an invalid virtual address. The third situation is a
-device \indextext{interrupt}, when a device signals that it needs
-attention, for example when the disk hardware finishes a read or write
-request.
+Existem três tipos de eventos que fazem a CPU interromper
+a execução normal de instruções e transferir o controle
+para um código especial que trata o evento. Uma dessas situações
+é uma chamada de sistema, quando um programa de usuário
+executa a instrução {\tt ecall} para solicitar que o kernel
+realize alguma ação. Outra situação é uma \indextext{exceção}:
+uma instrução (de usuário ou kernel) faz algo ilegal, como uma divisão
+por zero ou o uso de um endereço virtual inválido. A terceira situação é uma
+\indextext{interrupção} de dispositivo, quando um dispositivo sinaliza que precisa
+de atenção, por exemplo, quando o hardware de disco finaliza uma requisição
+de leitura ou escrita.
 
-This book uses \indextext{trap} as a generic term for these
-situations. Typically whatever code was executing at the time of the
-trap will later need to resume, and shouldn't need to be aware that
-anything special happened. That is, we often want traps to be
-transparent; this is particularly important for device interrupts, which the
-interrupted code typically doesn't expect. The usual sequence is that
-a trap forces a transfer of control into the kernel; the kernel saves
-registers and other state so that execution can be resumed; the kernel
-executes appropriate handler code (e.g., a system call implementation
-or device driver); the kernel restores the saved state and returns
-from the trap; and the original code resumes where it left off.
+Este livro usa \indextext{trap} como um termo genérico para essas
+situações. Tipicamente, o código que estava sendo executado no momento da
+trap precisará ser retomado depois, e não deve perceber que algo
+especial aconteceu. Ou seja, geralmente queremos que as traps sejam
+transparentes; isso é particularmente importante para interrupções de dispositivo,
+as quais o código interrompido normalmente não espera. A sequência usual é que
+uma trap transfere o controle para o kernel; o kernel salva os registradores
+e outros estados para que a execução possa ser retomada; o kernel
+executa o código apropriado de tratamento (por exemplo, uma implementação
+de chamada de sistema ou um driver de dispositivo); o kernel restaura o estado salvo e retorna
+da trap; e o código original retoma do ponto em que parou.
 
-Xv6 handles all traps in the kernel; traps are not delivered to user
-code. Handling traps in the kernel is natural for system calls. It
-makes sense for interrupts since isolation demands that only the
-kernel be allowed to use devices,
-and because the kernel is a convenient mechanism with which to
-share devices among multiple processes.
-It also makes sense for exceptions
-since xv6 responds to all exceptions from user space by killing the
-offending program.
+O xv6 trata todas as traps no kernel; traps não são entregues ao código
+de usuário. Tratar traps no kernel é natural no caso de chamadas de sistema.
+Faz sentido para interrupções porque o isolamento exige que apenas o
+kernel possa acessar dispositivos,
+e porque o kernel é um mecanismo conveniente para
+compartilhar dispositivos entre múltiplos processos.
+Também faz sentido para exceções,
+já que o xv6 responde a todas as exceções vindas do espaço do usuário
+matando o programa responsável.
 
-Xv6 trap handling proceeds in four stages: hardware actions taken by
-the RISC-V CPU, some assembly instructions that prepare the way for
-kernel C code, a C function that decides what to do with the trap,
-and the system call or device-driver service routine. While
-commonality among the three trap types suggests that a kernel could
-handle all traps with a single code path, it turns out to be
-convenient to have separate code for
-two distinct cases: traps from user space, and traps from kernel space.
-Kernel code (assembler or C) that
-processes a trap is often called a \indextext{handler};
-the first handler instructions are usually written in assembler
-(rather than C) and are sometimes called a \indextext{vector}.
+O tratamento de traps no xv6 ocorre em quatro estágios: ações de hardware tomadas pela
+CPU RISC-V, algumas instruções em assembly que preparam o caminho para
+o código em C do kernel, uma função em C que decide o que fazer com a trap,
+e a rotina de serviço da chamada de sistema ou do driver de dispositivo. Embora
+a semelhança entre os três tipos de trap sugira que o kernel poderia
+tratá-los todos com um único caminho de código, na prática é
+conveniente ter código separado para
+dois casos distintos: traps vindas do espaço do usuário, e traps do espaço do kernel.
+O código do kernel (em assembly ou C) que
+processa uma trap é frequentemente chamado de \indextext{handler};
+as primeiras instruções do handler são geralmente escritas em assembly
+(em vez de C) e às vezes são chamadas de \indextext{vetor}.
 
 
-\section{RISC-V trap machinery}
+\section{Mecanismo de trap do RISC-V}
 
-Each RISC-V CPU has a set of control registers that the kernel writes to
-tell the CPU how to handle traps, and that the kernel can read
-to find out about a trap that has occurred. The RISC-V documents
-contain the full story~\cite{riscv:priv}. {\tt riscv.h}
-\lineref{kernel/riscv.h}{1} contains definitions that xv6 uses. Here's
-an outline of the most important registers:
+Cada CPU RISC-V possui um conjunto de registradores de controle que o kernel escreve
+para informar à CPU como lidar com traps, e que o kernel pode ler
+para descobrir sobre uma trap que ocorreu. Os documentos do RISC-V
+contêm todos os detalhes~\cite{riscv:priv}. O arquivo {\tt riscv.h}
+\lineref{kernel/riscv.h:1} contém as definições utilizadas pelo xv6. Aqui está
+um resumo dos registradores mais importantes:
 
 \begin{itemize}
 
-\item \indexcode{stvec}: The kernel writes the address of its trap handler
-  here; the RISC-V jumps to the address in {\tt stvec} to handle a trap.
+\item \indexcode{stvec}: O kernel escreve aqui o endereço de seu handler de trap;
+  o RISC-V salta para o endereço em {\tt stvec} para tratar uma trap.
 
-\item \indexcode{sepc}: When a trap occurs, RISC-V saves the program counter
-  here (since the {\tt pc} is then overwritten with the
-  value in {\tt stvec}). The
-  {\tt sret} (return from trap) instruction copies {\tt sepc} to the
-  {\tt pc}. The kernel can write {\tt sepc} to control where {\tt
-    sret} goes.
+\item \indexcode{sepc}: Quando uma trap ocorre, o RISC-V salva o contador de programa
+  aqui (pois o {\tt pc} será sobrescrito com o
+  valor em {\tt stvec}). A instrução
+  {\tt sret} (retorno de trap) copia {\tt sepc} para o
+  {\tt pc}. O kernel pode escrever em {\tt sepc} para controlar para onde {\tt
+    sret} retornará.
 
-\item \indexcode{scause}: RISC-V puts a number here that describes
-the reason for the trap.
+\item \indexcode{scause}: O RISC-V coloca aqui um número que descreve
+a razão da trap.
 
-\item \indexcode{sscratch}: The trap handler code uses {\tt sscratch}
-  to help it avoid overwriting user registers before saving them.
+\item \indexcode{sscratch}: O código do handler de trap usa {\tt sscratch}
+  para evitar sobrescrever registradores de usuário antes de salvá-los.
 
-\item \indexcode{sstatus}: The SIE bit in {\tt sstatus}
-  controls whether device interrupts
-  are enabled. If the kernel clears SIE, the RISC-V will defer
-  device interrupts until the kernel sets SIE. The SPP bit
-  indicates whether a trap came from user mode or supervisor
-  mode, and controls to what mode {\tt sret} returns.
+\item \indexcode{sstatus}: O bit SIE em {\tt sstatus}
+  controla se interrupções de dispositivo
+  estão habilitadas. Se o kernel limpar o bit SIE, o RISC-V adiará
+  interrupções de dispositivo até que o kernel o reative. O bit SPP
+  indica se a trap veio do modo usuário ou supervisor,
+  e controla para qual modo {\tt sret} retorna.
 
 \end{itemize}
 
-The above registers relate to traps handled in supervisor mode, and they
-cannot be read or written in user mode.
+Os registradores acima se referem a traps tratadas no modo supervisor, e eles
+não podem ser lidos ou escritos em modo usuário.
 
-Each CPU on a multi-core chip has its own set of these registers,
-and more than one CPU may be handling a trap at any given time.
+Cada CPU em um chip multi-core possui seu próprio conjunto desses registradores,
+e mais de uma CPU pode estar lidando com uma trap ao mesmo tempo.
 
-When it needs to force a trap, the RISC-V hardware does the
-following for all trap types:
+Quando precisa forçar uma trap, o hardware RISC-V faz o
+seguinte para todos os tipos de trap:
 
 \begin{enumerate}
 
-\item If the trap is a device interrupt, and the {\tt sstatus} SIE bit
-  is clear, don't do any of the following.
+\item Se a trap for uma interrupção de dispositivo e o bit SIE de {\tt sstatus}
+  estiver limpo, não faça mais nada.
 
-\item Disable interrupts by clearing the SIE bit in {\tt sstatus}.
+\item Desabilita interrupções limpando o bit SIE em {\tt sstatus}.
 
-\item Copy the {\tt pc} to {\tt sepc}.
+\item Copia o {\tt pc} para {\tt sepc}.
 
-\item Save the current mode (user or supervisor) in the SPP bit in {\tt sstatus}.
+\item Salva o modo atual (usuário ou supervisor) no bit SPP de {\tt sstatus}.
 
-\item Set {\tt scause} to reflect the trap's cause.
+\item Define {\tt scause} para refletir a causa da trap.
 
-\item Set the mode to supervisor.
+\item Define o modo para supervisor.
 
-\item Copy {\tt stvec} to the {\tt pc}.
+\item Copia {\tt stvec} para o {\tt pc}.
 
-\item Start executing at the new {\tt pc}.
+\item Começa a execução no novo {\tt pc}.
 
 \end{enumerate}
 
-Note that the CPU doesn't switch to the kernel page table, doesn't
-switch to a stack in the kernel, and doesn't save any registers other
-than the {\tt pc}. Kernel software must perform these tasks.
-One reason that the CPU does minimal work during a trap is to provide
-flexibility to software; for example, some operating systems 
-omit a page table switch in some situations to increase
-trap performance.
+Note que a CPU não muda para a tabela de páginas do kernel, não
+muda para uma pilha no kernel, e não salva registradores além
+do {\tt pc}. O software do kernel deve realizar essas tarefas.
+Uma das razões para que a CPU faça o mínimo possível durante uma trap
+é oferecer flexibilidade ao software; por exemplo, alguns sistemas operacionais
+evitam mudar a tabela de páginas em certas situações para melhorar
+o desempenho da trap.
 
-It's worth thinking about whether any of the steps listed above could
-be omitted, perhaps in search of faster traps. Though there are
-situations in which a simpler sequence can work, many of the steps
-would be dangerous to omit in general. For example, suppose that the
-CPU didn't switch program counters. Then a trap from user space could
-switch to supervisor mode while still running user instructions. Those
-user instructions could break user/kernel isolation, for example
-by modifying the {\tt satp} register to point to a page table that
-allowed accessing all of physical memory. It is thus important that
-the CPU switch to a kernel-specified instruction address, namely {\tt
+Vale a pena pensar se algum dos passos listados acima poderia
+ser omitido, talvez em busca de traps mais rápidas. Embora existam
+situações em que uma sequência mais simples funcione, muitos dos passos
+seriam perigosos de omitir em geral. Por exemplo, suponha que a
+CPU não mudasse o contador de programa. Então uma trap vinda do espaço do usuário poderia
+mudar para o modo supervisor ainda executando instruções de usuário. Essas
+instruções poderiam violar o isolamento entre usuário e kernel, por exemplo
+modificando o registrador {\tt satp} para apontar para uma tabela de páginas que
+permite acesso a toda a memória física. Por isso, é importante que
+a CPU altere o endereço de instrução para um especificado pelo kernel, ou seja, {\tt
   stvec}.
 
-\section{Traps from user space}
+\section{Traps do espaço do usuário}
 
-Xv6 handles traps differently depending on whether
-the trap occurs while
-executing in the kernel or in user code. Here is the
-story for traps from user code; Section~\ref{s:ktraps}
-describes traps from kernel code.
+O Xv6 lida com traps de maneira diferente, dependendo de
+se a trap ocorre enquanto
+executa no núcleo ou no código do usuário. Aqui está a
+história das traps do código do usuário; a Seção~\ref{s:ktraps}
+descreve traps do código do núcleo.
 
-A trap may occur while executing in user space if the
-user program makes a
-system call ({\tt ecall} instruction), or does something
-illegal, or if a device interrupts.
-The high-level path of a trap from user space is
+Uma trap pode ocorrer enquanto executa no espaço do usuário se o
+programa do usuário fizer uma
+chamada de sistema (instrução {\tt ecall}), ou fizer algo
+ilegal, ou se um dispositivo interromper.
+O caminho de alto nível de uma trap do espaço do usuário é
 {\tt uservec}
-then {\tt usertrap}
-and when returning,
+\lineref{kernel/trampoline.S:/^uservec/},
+depois {\tt usertrap}
+\lineref{kernel/trap.c:/^usertrap/};
+e ao retornar,
 {\tt usertrapret}
-and then
+\lineref{kernel/trap.c:/^usertrapret/}
+e então
 {\tt userret}
+\lineref{kernel/trampoline.S:/^userret/}.
 
-% talk about why RISC-V doesn't switch page tables
+% falar sobre por que RISC-V não troca tabelas de páginas
 
-A major constraint on the design of xv6's trap handling is the fact
-that the RISC-V hardware does not switch page tables when it forces a
-trap. This means that the trap handler
-address in {\tt stvec} must have a valid
-mapping in the user page table, since that's the page table in force
-when the trap handling code starts executing. Furthermore, xv6's trap
-handling code needs to switch to the kernel page table; in order to be
-able to continue executing after that switch, the kernel page table
-must also have a mapping for the handler pointed to by {\tt stvec}.
+Uma grande restrição no design do tratamento de traps do xv6 é o fato
+de que o hardware RISC-V não troca tabelas de páginas quando força uma
+trap. Isso significa que o endereço do manipulador de trap
+em {\tt stvec} deve ter um mapeamento válido na tabela de páginas do usuário,
+já que essa é a tabela de páginas em vigor
+quando o código de tratamento de trap começa a ser executado. Além disso, o código de
+tratamento de trap do xv6 precisa trocar para a tabela de páginas do núcleo; para poder
+continuar executando após essa troca, a tabela de páginas do núcleo
+também deve ter um mapeamento para o manipulador apontado por {\tt stvec}.
 
-Xv6 satisfies these requirements using a \indextext{trampoline} page.
-The trampoline page contains {\tt uservec}, the xv6 trap handling code
-that {\tt stvec} points to. The trampoline page is mapped in
-every process's page table at address
+O Xv6 satisfaz esses requisitos usando uma página de \indextext{trampolim}.
+A página de trampolim contém {\tt uservec}, o código de tratamento de trap do xv6
+que {\tt stvec} aponta. A página de trampolim está mapeada na
+tabela de páginas de cada processo no endereço
 \indexcode{TRAMPOLINE},
-which is at the top of the virtual address space so that it will
-be above memory that programs use for themselves.
-The trampoline page is also mapped at address {\tt TRAMPOLINE}
-in the kernel page table. See Figure~\ref{fig:as} and
-Figure~\ref{fig:xv6_layout}. Because the trampoline page is mapped in
-the user page table, traps can start
-executing there in supervisor mode. Because the trampoline page is
-mapped at the same address in the kernel address space, the trap handler
-can continue to execute after it switches to the kernel page
-table.
+que está no topo do espaço de endereços virtual para que fique
+acima da memória que os programas usam para si mesmos.
+A página de trampolim também está mapeada no endereço {\tt TRAMPOLINE}
+na tabela de páginas do núcleo. Veja a Figura~\ref{fig:as} e
+a Figura~\ref{fig:xv6_layout}. Como a página de trampolim está mapeada na
+tabela de páginas do usuário, as traps podem começar
+a ser executadas lá em modo supervisor. Como a página de trampolim está
+mapeada no mesmo endereço no espaço de endereços do núcleo, o manipulador de trap
+pode continuar a executar após trocar para a tabela de páginas do núcleo.
 
-The code for the {\tt uservec} trap handler is in {\tt trampoline.S}
-When {\tt uservec} starts, all 32 registers contain values owned by
-the interrupted user code. These 32 values need to be saved somewhere
-in memory, so that later on
-the kernel can restore them before returning to user space.
-Storing to memory requires use of a register
-to hold the address,
-but at this point there are no general-purpose registers available!
-Luckily RISC-V provides a helping hand in the
-form of the {\tt sscratch} register. The {\tt csrw} instruction at
-the start of {\tt uservec} saves {\tt a0} in {\tt
-  sscratch}. Now 
-{\tt uservec} has
-one register ({\tt a0}) to play with.
+O código do manipulador de trap {\tt uservec} está em {\tt trampoline.S}
+\lineref{kernel/trampoline.S:/^uservec/}.
+Quando {\tt uservec} começa, todos os 32 registradores contêm valores pertencentes ao
+código do usuário interrompido. Esses 32 valores precisam ser salvos em algum lugar
+na memória, para que mais tarde
+o núcleo possa restaurá-los antes de retornar ao espaço do usuário.
+Armazenar na memória requer o uso de um registrador
+para manter o endereço,
+mas neste ponto não há registradores de uso geral disponíveis!
+Felizmente, o RISC-V fornece uma ajuda na
+forma do registrador {\tt sscratch}. A instrução {\tt csrw} no
+início de {\tt uservec} salva {\tt a0} em {\tt
+  sscratch}. Agora 
+{\tt uservec} tem
+um registrador ({\tt a0}) para trabalhar.
 
-{\tt uservec}'s next task is to save the 32 user registers.
-The kernel allocates, for each process, a page of memory for a
-{\tt trapframe} structure that (among other things) has space to
-save the 32 user registers
-refers to the user page table, {\tt uservec} needs the trapframe to be
-mapped in the user address space. Xv6 maps each process's trapframe
-at virtual address {\tt TRAPFRAME} in that process's user page table;
-{\tt TRAPFRAME} is
-just below {\tt TRAMPOLINE}. The process's {\tt p->trapframe} also
-points to the
-trapframe, though at its physical address so the kernel can use it
-through the kernel page table.
+A próxima tarefa de {\tt uservec} é salvar os 32 registradores do usuário.
+O núcleo aloca, para cada processo, uma página de memória para uma
+estrutura {\tt trapframe} que (entre outras coisas) tem espaço para
+salvar os 32 registradores do usuário
+\lineref{kernel/proc.h:/^struct.trapframe/}. Como {\tt satp} ainda
+se refere à tabela de páginas do usuário, {\tt uservec} precisa que o trapframe seja
+mapeado no espaço de endereços do usuário. O Xv6 mapeia o trapframe de cada processo
+no endereço virtual {\tt TRAPFRAME} na tabela de páginas do usuário desse processo;
+{\tt TRAPFRAME} está
+logo abaixo de {\tt TRAMPOLINE}. O {\tt p->trapframe} do processo também
+aponta para o
+trapframe, embora em seu endereço físico para que o núcleo possa usá-lo
+através da tabela de páginas do núcleo.
 
-Thus {\tt uservec} loads address {\tt TRAPFRAME} into {\tt a0}
-and saves all the user registers there,
-including the user's {\tt a0}, read back from {\tt sscratch}.
+Assim, {\tt uservec} carrega o endereço {\tt TRAPFRAME} em {\tt a0}
+e salva todos os registradores do usuário lá,
+incluindo o {\tt a0} do usuário, lido de volta de {\tt sscratch}.
 
-The {\tt trapframe} contains the address of the current process's
-kernel stack, the current CPU's hartid, the address of the {\tt usertrap}
-function,
-and the address of the kernel page table. {\tt uservec}
-retrieves these values, switches {\tt satp} to the kernel page table,
-and jumps to {\tt usertrap}.
+O {\tt trapframe} contém o endereço da
+pilha do núcleo do processo atual, o hartid da CPU atual, o endereço da função
+{\tt usertrap},
+e o endereço da tabela de páginas do núcleo. {\tt uservec}
+recupera esses valores, troca {\tt satp} para a tabela de páginas do núcleo,
+e salta para {\tt usertrap}.
 
-The job of {\tt usertrap} is to determine
-the cause of the trap, process it, and return
-It first changes {\tt stvec} so
-that a trap while in the kernel will be handled by
-{\tt kernelvec} rather than {\tt uservec}.
-It saves the {\tt sepc} register (the saved user program counter),
-because 
-{\tt usertrap} might call \lstinline{yield} to switch
-to another process's kernel thread, and that process might return
-to user space, in the process of which it will modify \lstinline{sepc}.
-If the trap is a system call, {\tt usertrap} calls {\tt syscall} to
-handle it;
-if a device interrupt, {\tt devintr};
-otherwise it's an exception, and the kernel kills the
-faulting process.
-The system call path adds four to the saved user program counter
-because RISC-V, in the case of a system call,
-leaves the program pointer pointing to the {\tt ecall} instruction
-but user code needs to resume executing at the subsequent instruction.
-On the way out, {\tt usertrap} checks if the process has been
-killed or should yield the CPU (if this trap is a timer interrupt).
+A tarefa de {\tt usertrap} é determinar
+a causa da trap, processá-la e retornar
+\lineref{kernel/trap.c:/^usertrap/}.
+Ele primeiro altera {\tt stvec} para que
+uma trap enquanto no núcleo seja tratada por
+{\tt kernelvec} em vez de {\tt uservec}.
+Ele salva o registrador {\tt sepc} (o contador de programa do usuário salvo),
+porque 
+{\tt usertrap} pode chamar \lstinline{yield} para
+trocar para o thread do núcleo de outro processo, e esse processo pode retornar
+ao espaço do usuário, durante o qual ele modificará \lstinline{sepc}.
+Se a trap for uma chamada de sistema, {\tt usertrap} chama {\tt syscall} para
+tratá-la;
+se for uma interrupção de dispositivo, {\tt devintr};
+caso contrário, é uma exceção, e o núcleo finaliza o
+processo com falha.
+O caminho da chamada de sistema adiciona quatro ao contador de programa do usuário salvo
+porque o RISC-V, no caso de uma chamada de sistema,
+deixa o ponteiro do programa apontando para a instrução {\tt ecall}
+mas o código do usuário precisa retomar a execução na instrução subsequente.
+No caminho de saída, {\tt usertrap} verifica se o processo foi
+finalizado ou se deve ceder a CPU (se essa trap for uma interrupção de temporizador).
 
-The first step in returning to user space is the call to {\tt usertrapret}
-This function sets up the RISC-V control registers to prepare for a
-future trap from user space: setting {\tt stvec}
-to {\tt uservec} and preparing the trapframe fields that
-{\tt uservec} relies on.
-{\tt usertrapret} sets {\tt sepc} to the previously
-saved user program counter.
-At the end, {\tt usertrapret}
-calls {\tt userret} on the trampoline page that is mapped in
-both user and kernel page tables; the reason is that assembly
-code in {\tt userret} will switch page tables.
+O primeiro passo para retornar ao espaço do usuário é a chamada para {\tt usertrapret}
+\lineref{kernel/trap.c:/^usertrapret/}.
+Essa função configura os registradores de controle do RISC-V para se preparar para uma
+futura trap do espaço do usuário: configurando {\tt stvec}
+para {\tt uservec} e preparando os campos do trapframe que
+{\tt uservec} depende.
+{\tt usertrapret} define {\tt sepc} para o contador de programa do usuário previamente
+salvo.
+No final, {\tt usertrapret}
+chama {\tt userret} na página de trampolim que está mapeada em
+tanto na tabela de páginas do usuário quanto na do núcleo; a razão é que o código assembly
+em {\tt userret} trocará tabelas de páginas.
 
-{\tt usertrapret}'s call to {\tt userret} passes 
-a pointer to the process's user page table in {\tt a0}
-{\tt userret} switches {\tt satp} to the process's user page table.
-Recall that the user page table maps both the trampoline page
-and {\tt TRAPFRAME}, but nothing else from the kernel.
-The trampoline page mapping at the same
-virtual address in user and kernel page tables allows
-{\tt userret} to keep executing after changing {\tt satp}.
-From this point on, the only data {\tt userret} can use is
-the register contents and the content of the trapframe.
-{\tt userret} loads the {\tt TRAPFRAME} address into {\tt a0},
-restores saved user registers from the trapframe via {\tt a0},
-restores the saved user {\tt a0},
-and executes {\tt sret} to return to user space.
+A chamada de {\tt usertrapret} para {\tt userret} passa 
+um ponteiro para a tabela de páginas do usuário do processo em {\tt a0}
+\lineref{kernel/trampoline.S:/^userret/}.
+{\tt userret} troca {\tt satp} para a tabela de páginas do usuário do processo.
+Lembre-se de que a tabela de páginas do usuário mapeia tanto a página de trampolim
+quanto {\tt TRAPFRAME}, mas nada mais do núcleo.
+O mapeamento da página de trampolim no mesmo
+endereço virtual nas tabelas de páginas do usuário e do núcleo permite
+que {\tt userret} continue executando após mudar {\tt satp}.
+A partir deste ponto, os únicos dados que {\tt userret} pode usar são
+os conteúdos dos registradores e o conteúdo do trapframe.
+{\tt userret} carrega o endereço {\tt TRAPFRAME} em {\tt a0},
+restaura os registradores do usuário salvos do trapframe via {\tt a0},
+restaura o {\tt a0} do usuário salvo,
+e executa {\tt sret} para retornar ao espaço do usuário.
 
-\section{Code: Calling system calls}
+\section{Código: Chamando chamadas de sistema}
 
-Chapter~\ref{CH:FIRST} ended with 
+O Capítulo~\ref{CH:FIRST} terminou com 
 \indexcode{initcode.S}
-invoking the {\tt exec} system call
-Let's look at how the user call
-makes its way to the {\tt exec} system call's
-implementation in the kernel.
+invocando a chamada de sistema {\tt exec}
+\lineref{user/initcode.S:/SYS_exec/}.
+Vamos analisar como a chamada do usuário
+chega à implementação da chamada de sistema {\tt exec} no núcleo.
 
 {\tt initcode.S}
-places the arguments for
+coloca os argumentos para
 \indexcode{exec}
-in registers {\tt a0} and {\tt a1}, and puts the
-system call number in
+nos registradores {\tt a0} e {\tt a1}, e coloca o
+número da chamada de sistema em
 \texttt{a7}.
-System call numbers match the entries in the {\tt syscalls} array,
-a table of function pointers
-The \lstinline{ecall} instruction traps into the kernel
-and causes
+Os números das chamadas de sistema correspondem às entradas no array {\tt syscalls},
+uma tabela de ponteiros de função
+\lineref{kernel/syscall.c:/syscalls/}.
+A instrução \lstinline{ecall} provoca uma trap no núcleo
+e faz com que
 {\tt uservec},
-{\tt usertrap}, and then {\tt syscall} to execute, as we saw above.
+{\tt usertrap} e, em seguida, {\tt syscall} sejam executados, como vimos acima.
 
 \indexcode{syscall}
-retrieves the system call number from the saved
-\texttt{a7} in the trapframe
-and uses it to index into {\tt syscalls}.
-For the first system call, 
+\lineref{kernel/syscall.c:/^syscall/} 
+recupera o número da chamada de sistema do {\tt a7} salvo no trapframe
+e o usa para indexar no {\tt syscalls}.
+Para a primeira chamada de sistema, 
 \texttt{a7}
-contains 
+contém 
 \indexcode{SYS_exec}
-resulting in a call to the system call implementation function
+\lineref{kernel/syscall.h:/SYS_exec/},
+resultando em uma chamada para a função de implementação da chamada de sistema
 \lstinline{sys_exec}.
 
-When \lstinline{sys_exec} returns,
+Quando \lstinline{sys_exec} retorna,
 \lstinline{syscall}
-records its return value in
+registra seu valor de retorno em
 \lstinline{p->trapframe->a0}.
-This will cause the original user-space call to 
-{\tt exec()} to return that value, since the C
-calling convention on RISC-V places return values in {\tt a0}.
-System calls conventionally return negative numbers to indicate
-errors, and zero or positive numbers for success.
-If the system call number is invalid,
+Isso fará com que a chamada original do espaço do usuário 
+{\tt exec()} retorne esse valor, uma vez que a
+convenção de chamada C no RISC-V coloca valores de retorno em {\tt a0}.
+Chamadas de sistema geralmente retornam números negativos para indicar
+erros, e zero ou números positivos para sucesso.
+Se o número da chamada de sistema for inválido,
 \lstinline{syscall}
-prints an error and returns $-1$.
+imprime um erro e retorna $-1$.
 
-\section{Code: System call arguments}
+\section{Código: Argumentos da chamada de sistema}
 
-System call implementations in the kernel need to find the arguments
-passed by user code. Because user code calls system call wrapper
-functions, the arguments are initially where the RISC-V C calling
-convention places them: in registers.
-The kernel trap code saves user registers to the current
-process's trap frame, where kernel code can find them.
-The kernel functions
+As implementações de chamadas de sistema no núcleo precisam encontrar os argumentos
+passados pelo código do usuário. Como o código do usuário chama funções wrapper de chamadas de sistema,
+os argumentos estão inicialmente onde a convenção de chamada C do RISC-V os coloca: nos registradores.
+O código de trap do núcleo salva os registradores do usuário no trap frame do processo atual, onde o código do núcleo pode encontrá-los.
+As funções do núcleo
 \lstinline{argint},
 \lstinline{argaddr},
-and
+e
 \lstinline{argfd}
-retrieve the 
-\textit{n} 'th 
-system call argument
-from the trap frame
-as an integer, pointer, or a file descriptor.
-They all call {\tt argraw} to retrieve the appropriate saved
-user register
+recuperam o 
+\textit{n} 'ésimo 
+argumento da chamada de sistema
+do trap frame
+como um inteiro, ponteiro ou descritor de arquivo.
+Todos eles chamam {\tt argraw} para recuperar o registrador de usuário salvo apropriado
+\lineref{kernel/syscall.c:/^argraw/}.
 
-Some system calls pass pointers as arguments, and the kernel must use
-those pointers to read or write user memory. The {\tt exec} system
-call, for example, passes the kernel an array of pointers
-referring to string arguments in user space.
-These pointers pose
-two challenges. First, the user program may be buggy or malicious, and
-may pass the kernel an invalid pointer or a pointer intended to trick
-the kernel into accessing kernel memory instead of user memory.
-Second, the xv6 kernel page table mappings are not the same as the
-user page table mappings, so the kernel cannot use ordinary
-instructions to load or store from user-supplied addresses.
+Algumas chamadas de sistema passam ponteiros como argumentos, e o núcleo deve usar
+esses ponteiros para ler ou escrever na memória do usuário. A chamada de sistema {\tt exec}, por exemplo, passa ao núcleo um array de ponteiros
+referindo-se a argumentos de string no espaço do usuário.
+Esses ponteiros apresentam
+duas dificuldades. Primeiro, o programa do usuário pode estar com defeito ou ser malicioso, e
+pode passar ao núcleo um ponteiro inválido ou um ponteiro destinado a enganar
+o núcleo ao acessar a memória do núcleo em vez da memória do usuário.
+Em segundo lugar, os mapeamentos da tabela de páginas do núcleo xv6 não são os mesmos que os
+mapeamentos da tabela de páginas do usuário, então o núcleo não pode usar instruções comuns para carregar ou armazenar a partir de endereços fornecidos pelo usuário.
 
-The kernel implements functions that safely transfer data to and
-from user-supplied addresses.
-File system calls such as
-{\tt exec} use {\tt fetchstr} to retrieve string file-name arguments from user
-space.
-\lstinline{fetchstr} calls \lstinline{copyinstr}
-to do the hard work.
+O núcleo implementa funções que transferem dados de forma segura para e
+a partir de endereços fornecidos pelo usuário.
+{\tt fetchstr} é um exemplo \lineref{kernel/syscall.c:/^fetchstr/}.
+Chamadas de sistema de arquivos, como
+{\tt exec}, usam {\tt fetchstr} para recuperar argumentos de nome de arquivo em string do espaço do usuário.
+\lstinline{fetchstr} chama \lstinline{copyinstr}
+para fazer o trabalho pesado.
 
 \indexcode{copyinstr}
-\lstinline{dst} from virtual address \lstinline{srcva} in the user page
-table \lstinline{pagetable}.
-Since \lstinline{pagetable} is {\it not} the current page
-table,
-\lstinline{copyinstr} uses {\tt walkaddr}
-(which calls {\tt walk}) to look up
-\lstinline{srcva} in
-\lstinline{pagetable}, yielding
-physical address \lstinline{pa0}.
-The kernel's page table maps all of physical RAM 
-at virtual addresses that are equal to the RAM's physical address.
-This allows
-{\tt copyinstr} to directly copy string bytes from {\tt pa0} to {\tt dst}.
+\lineref{kernel/vm.c:/^copyinstr/} copia até \lstinline{max} bytes para
+\lstinline{dst} a partir do endereço virtual \lstinline{srcva} na tabela de páginas do usuário \lstinline{pagetable}.
+Como \lstinline{pagetable} {\it não} é a tabela de páginas atual,
+\lstinline{copyinstr} usa {\tt walkaddr}
+(que chama {\tt walk}) para procurar
+\lstinline{srcva} em
+\lstinline{pagetable}, resultando no
+endereço físico \lstinline{pa0}.
+A tabela de páginas do núcleo mapeia toda a RAM física 
+em endereços virtuais que são iguais ao endereço físico da RAM.
+Isso permite que
+{\tt copyinstr} copie diretamente os bytes da string de {\tt pa0} para {\tt dst}.
 {\tt walkaddr} 
-checks that the user-supplied virtual address is part of
-the process's user address space, so programs
-cannot trick the kernel into reading other memory.
-A similar function, {\tt copyout}, copies data from the
-kernel to a user-supplied address.
+\lineref{kernel/vm.c:/^walkaddr/}
+verifica se o endereço virtual fornecido pelo usuário é parte
+do espaço de endereços do usuário do processo, para que os programas
+não possam enganar o núcleo a ler outra memória.
+Uma função similar, {\tt copyout}, copia dados do
+núcleo para um endereço fornecido pelo usuário.
 
-\section{Traps from kernel space}
+\section{Traps do espaço do núcleo}
 \label{s:ktraps}
 
-Xv6 handles traps from kernel code in a different way
-than traps from user code.
-When entering the kernel, {\tt usertrap} points {\tt stvec}
-to the assembly code at {\tt kernelvec}
-Since {\tt kernelvec} only executes if
-xv6 was already in the kernel, {\tt kernelvec} can rely
-on {\tt satp} being set to the kernel page table, and on the
-stack pointer referring to a valid kernel stack.
-{\tt kernelvec} pushes all 32 registers onto the stack,
-from which it will later restore them
-so that the interrupted
-kernel code can resume without disturbance.
+O Xv6 lida com traps do código do núcleo de maneira diferente
+do que com traps do código do usuário.
+Ao entrar no núcleo, {\tt usertrap} aponta {\tt stvec}
+para o código assembly em {\tt kernelvec}
+\lineref{kernel/kernelvec.S:/^kernelvec/}.
+Como {\tt kernelvec} só é executado se
+xv6 já estiver no núcleo, {\tt kernelvec} pode confiar
+que {\tt satp} está definido para a tabela de páginas do núcleo, e que o
+ponteiro da pilha refere-se a uma pilha de núcleo válida.
+{\tt kernelvec} empilha todos os 32 registradores na pilha,
+dos quais ele os restaurará mais tarde
+para que o código do núcleo interrompido possa retomar sem interrupções.
 
-{\tt kernelvec} saves the registers on the stack of the interrupted
-kernel thread, which makes sense because the register values belong to
-that thread. This is particularly important if the trap causes a
-switch to a different thread -- in that case the trap will actually
-return from the stack of the new thread, leaving the interrupted
-thread's saved registers safely on its stack.
+{\tt kernelvec} salva os registradores na pilha do thread do núcleo interrompido,
+o que faz sentido porque os valores dos registradores pertencem a
+esse thread. Isso é particularmente importante se a trap causar uma
+troca para um thread diferente -- nesse caso, a trap realmente
+retornará da pilha do novo thread, deixando os registradores salvos do
+thread interrompido seguros em sua pilha.
 
-{\tt kernelvec} jumps to {\tt kerneltrap}
-{\tt kerneltrap} is prepared for two types of traps:
-device interrupts and exceptions. It calls
+{\tt kernelvec} salta para {\tt kerneltrap}
+\lineref{kernel/trap.c:/^kerneltrap/} após salvar os registradores.
+{\tt kerneltrap} está preparado para dois tipos de traps:
+interrupções de dispositivo e exceções. Ele chama
 {\tt devintr}
-to check for and handle the former.
-If the trap isn't a device interrupt, it must be an exception,
-and that is always a fatal error if it occurs in the xv6 kernel;
-the kernel calls \lstinline{panic} and stops executing.
+\lineref{kernel/trap.c:/^devintr/}
+para verificar e lidar com a primeira.
+Se a trap não for uma interrupção de dispositivo, deve ser uma exceção,
+e isso é sempre um erro fatal se ocorrer no núcleo do xv6;
+o núcleo chama \lstinline{panic} e para de executar.
 
-If {\tt kerneltrap} was called due to a timer interrupt, and a
-process's kernel thread is running (as opposed to a scheduler thread),
-{\tt kerneltrap} calls {\tt yield} to give other threads a chance to
-run. At some point one of those threads will yield, and let our thread
-and its {\tt kerneltrap} resume again.
-Chapter~\ref{CH:SCHED} explains what happens in {\tt yield}.
+Se {\tt kerneltrap} foi chamado devido a uma interrupção de temporizador, e um
+thread do núcleo de um processo está em execução (em oposição a um thread de escalonador),
+{\tt kerneltrap} chama {\tt yield} para dar a outros threads a chance de
+executar. Em algum momento, um desses threads irá ceder, permitindo que nosso thread
+e seu {\tt kerneltrap} sejam retomados novamente.
+O Capítulo~\ref{CH:SCHED} explica o que acontece em {\tt yield}.
 
-When {\tt kerneltrap}'s work is done, it needs to return to whatever
-code was interrupted by the trap. Because a {\tt yield} may have
-disturbed {\tt sepc} and the previous mode in {\tt sstatus},
-{\tt kerneltrap} saves them when it starts. It now restores those
-control registers and returns to {\tt kernelvec}
-{\tt kernelvec} pops the saved registers from the stack and
-executes {\tt sret}, which copies {\tt sepc} to {\tt pc}
-and resumes the interrupted kernel code.
+Quando o trabalho de {\tt kerneltrap} está concluído, ele precisa retornar ao código
+que foi interrompido pela trap. Como um {\tt yield} pode ter
+perturbado {\tt sepc} e o modo anterior em {\tt sstatus},
+{\tt kerneltrap} os salva quando começa. Ele agora restaura esses
+registradores de controle e retorna para {\tt kernelvec}
+\lineref{kernel/kernelvec.S:/call.kerneltrap$/}.
+{\tt kernelvec} desempilha os registradores salvos da pilha e
+executa {\tt sret}, que copia {\tt sepc} para {\tt pc}
+e retoma o código do núcleo interrompido.
 
-It's worth thinking through how the trap return happens if
-{\tt kerneltrap} called {\tt yield} due to a timer interrupt.
+Vale a pena pensar em como o retorno da trap acontece se
+{\tt kerneltrap} chamou {\tt yield} devido a uma interrupção de temporizador.
 
-Xv6 sets a CPU's {\tt stvec} to {\tt kernelvec} when that CPU
-enters the kernel from user space; you can see this in {\tt usertrap}
-There's a window of time when the kernel has started executing
-but {\tt stvec} is still set to {\tt uservec}, and it's crucial that 
-no device interrupt occur during that window.
-Luckily the RISC-V always disables interrupts when it starts
-to take a trap, and {\tt usertrap} doesn't enable them again until
-after it sets {\tt stvec}.
+O Xv6 define o {\tt stvec} de uma CPU para {\tt kernelvec} quando essa CPU
+entra no núcleo a partir do espaço do usuário; você pode ver isso em {\tt usertrap}
+\lineref{kernel/trap.c:/stvec.*kernelvec/}.
+Há uma janela de tempo em que o núcleo começou a ser executado
+mas {\tt stvec} ainda está definido como {\tt uservec}, e é crucial que 
+nenhuma interrupção de dispositivo ocorra durante essa janela.
+Felizmente, o RISC-V sempre desativa interrupções quando começa
+a lidar com uma trap, e {\tt usertrap} não as reativa até
+depois de definir {\tt stvec}.
 
-\section{Page-fault exceptions}
+\section{Exceções de falha de página}
 \label{sec:pagefaults}
 
-Xv6's response to exceptions is quite boring: if an exception happens
-in user space, the kernel kills the faulting process.  If an
-exception happens in the kernel, the kernel panics.  Real operating systems
-often respond in much more interesting ways.
+A resposta do Xv6 a exceções é bastante simples: se uma exceção acontece
+no espaço do usuário, o núcleo finaliza o processo com falha. Se uma
+exceção acontece no núcleo, o núcleo entra em pânico. Sistemas operacionais
+reais frequentemente respondem de maneiras muito mais interessantes.
 
-As an example,
-many kernels use page faults to implement
-\indextext{copy-on-write (COW) fork}.
-To explain copy-on-write fork, consider xv6's \lstinline{fork},
-described in Chapter~\ref{CH:MEM}.
-\lstinline{fork} causes the child's initial
-memory content to be the same as the parent's at the time of the fork.
-Xv6 implements fork with
+Como exemplo,
+muitos núcleos usam falhas de página para implementar
+\indextext{fork de cópia sob demanda (COW)}.
+Para explicar o fork de cópia sob demanda, considere o \lstinline{fork} do xv6,
+descrito no Capítulo~\ref{CH:MEM}.
+O \lstinline{fork} faz com que o conteúdo inicial da memória do filho
+seja o mesmo que o do pai no momento do fork.
+O Xv6 implementa o fork com
 \lstinline{uvmcopy}
-which allocates physical memory for
-the child and copies the parent's memory into it.
-It would be more efficient if the child and parent could share 
-the parent's physical memory.
-A straightforward implementation of this would not work, however,
-since it would cause the parent and child to disrupt each other's
-execution with their writes to the shared stack and heap.
+\lineref{kernel/vm.c:/^uvmcopy/},
+que aloca memória física para
+o filho e copia a memória do pai para ele.
+Seria mais eficiente se o filho e o pai pudessem compartilhar 
+a memória física do pai.
+Uma implementação direta disso não funcionaria, no entanto,
+já que causaria a interrupção da execução um do outro com suas gravações na pilha e heap compartilhados.
 
-Parent and child can safely share physical memory by
-appropriate use of page-table permissions and page faults.
-The CPU raises a
-\indextext{page-fault exception}
-when a virtual address is used that has no mapping
-in the page table, or has a mapping whose \lstinline{PTE_V}
-flag is clear, or a mapping whose permission bits
+Pai e filho podem compartilhar com segurança a memória física por meio
+do uso apropriado de permissões de tabela de páginas e falhas de página.
+A CPU gera uma
+\indextext{exceção de falha de página}
+quando um endereço virtual é utilizado que não tem mapeamento
+na tabela de páginas, ou tem um mapeamento cujo flag \lstinline{PTE_V}
+está apagado, ou um mapeamento cujos bits de permissão
 (\lstinline{PTE_R},
 \lstinline{PTE_W},
 \lstinline{PTE_X},
 \lstinline{PTE_U})
-forbid the operation being attempted.
-RISC-V distinguishes three
-kinds of page fault: load page faults (caused by load instructions),
-store page faults (caused by store instructions),
-and instruction
-page faults (caused by fetches of instructions to be executed).  The
-\lstinline{scause} register indicates the type of the
-page fault and the \indexcode{stval} register contains the address
-that couldn't be translated.
+proíbem a operação sendo tentada.
+O RISC-V distingue três
+tipos de falha de página: falhas de página de carregamento (causadas por instruções de carregamento),
+falhas de página de armazenamento (causadas por instruções de armazenamento),
+e falhas de página de instrução (causadas por buscas de instruções a serem executadas). O
+registrador \lstinline{scause} indica o tipo da
+falha de página e o registrador \indexcode{stval} contém o endereço
+que não pôde ser traduzido.
 
-The basic plan in COW fork is for the parent and child to initially
-share all physical pages, but for each to map them read-only (with the
-\lstinline{PTE_W} flag clear).
-Parent and child can read from the shared physical memory.
-If either writes a given page,
-the RISC-V CPU raises a page-fault exception.
-The kernel's trap handler responds by allocating a
-new page of physical memory and copying into it
-the physical page that the faulted address maps to.
-The kernel changes the relevant PTE in the faulting process's page
-table to point to the copy and to allow writes as well as reads,
-and then resumes the faulting
-process at the instruction that caused the fault. Because the 
-PTE now allows writes, the re-executed instruction
-will execute without a fault. Copy-on-write requires book-keeping
-to help decide when physical pages can be freed, since each page can
-be referenced by a varying number of page tables depending on the history of
-forks, page faults, execs, and exits. This book-keeping allows
-an important optimization: if a process incurs a store page
-fault and the physical page is only referred to from that process's
-page table, no copy is needed.
+O plano básico no fork COW é que o pai e o filho compartilhem inicialmente
+todas as páginas físicas, mas cada um as mapeie como somente leitura (com o
+flag \lstinline{PTE_W} apagado).
+Pai e filho podem ler da memória física compartilhada.
+Se um dos dois gravar em uma determinada página,
+a CPU RISC-V gera uma exceção de falha de página.
+O manipulador de trap do núcleo responde alocando uma
+nova página de memória física e copiando para ela
+a página física que o endereço falhado mapeia.
+O núcleo altera o PTE relevante na tabela de páginas do processo com falha
+para apontar para a cópia e permitir gravações, além de leituras,
+e então retoma o processo com falha na instrução que causou a falha. Como o 
+PTE agora permite gravações, a instrução reexecutada
+será executada sem uma falha. A cópia sob demanda requer controle
+para ajudar a decidir quando as páginas físicas podem ser liberadas, já que cada página pode
+ser referenciada por um número variável de tabelas de páginas dependendo da história de
+forks, falhas de página, execuções e saídas. Esse controle permite
+uma otimização importante: se um processo sofrer uma falha de página de armazenamento
+e a página física for referida apenas pela tabela de páginas daquele processo,
+nenhuma cópia é necessária.
 
-Copy-on-write makes \lstinline{fork} faster, since \lstinline{fork}
-need not copy memory. Some of the memory will have to be copied
-later, when written, but it's often the case that most of the
-memory never has to be copied.
-A common example is
-\lstinline{fork} followed by \lstinline{exec}:
-a few pages may be written after the \lstinline{fork},
-but then the child's \lstinline{exec} releases
-the bulk of the memory inherited from the parent.
-Copy-on-write \lstinline{fork} eliminates the need to
-ever copy this memory.
-Furthermore, COW fork is transparent:
-no modifications to applications are necessary for
-them to benefit.
+A cópia sob demanda torna o \lstinline{fork} mais rápido, já que o \lstinline{fork}
+não precisa copiar memória. Parte da memória terá que ser copiada
+mais tarde, quando for gravada, mas é comum que a maior parte da
+memória nunca precise ser copiada.
+Um exemplo comum é
+\lstinline{fork} seguido de \lstinline{exec}:
+poucas páginas podem ser escritas após o \lstinline{fork},
+mas então o \lstinline{exec} do filho libera
+a maior parte da memória herdada do pai.
+A cópia sob demanda \lstinline{fork} elimina a necessidade de
+copiar essa memória.
+Além disso, o fork COW é transparente:
+nenhuma modificação nas aplicações é necessária para
+que elas se beneficiem.
 
-The combination of page tables and page faults opens up a wide range
-of interesting possibilities in addition to COW fork.  Another
-widely-used feature is called \indextext{lazy allocation}, which has
-two parts.  First, when an application asks for more memory by calling
-\lstinline{sbrk}, the kernel notes the increase in size, but does not
-allocate physical memory and does not create PTEs for the new range of
-virtual addresses.  Second, on a page fault on one of those new
-addresses, the kernel allocates a page of physical memory and maps it
-into the page table.
-Like COW fork,
-the kernel can implement lazy allocation transparently to applications.
+A combinação de tabelas de páginas e falhas de página abre uma ampla gama
+de possibilidades interessantes além do fork COW. Outra
+característica amplamente utilizada é chamada de \indextext{alocação preguiçosa}, que tem
+duas partes. Primeiro, quando uma aplicação solicita mais memória chamando
+\lstinline{sbrk}, o núcleo anota o aumento de tamanho, mas não
+aloca memória física e não cria PTEs para o novo intervalo de
+endereços virtuais. Em segundo lugar, em uma falha de página em um dos novos
+endereços, o núcleo aloca uma página de memória física e a mapeia
+na tabela de páginas.
+Assim como o fork COW,
+o núcleo pode implementar a alocação preguiçosa de forma transparente para as aplicações.
 
-Since applications often ask for more memory than they need, lazy
-allocation is a win: the kernel doesn't have to do any work at all
-for pages that the application never uses.
-Furthermore, if the application is
-asking to grow the address space by a lot, then \lstinline{sbrk} 
-without lazy allocation is
-expensive: if an application asks for a gigabyte of memory,
-the kernel has to allocate and zero 262,144 4096-byte pages.
-Lazy allocation allows this cost
-to be spread over time.  On the other hand, lazy allocation
-incurs the extra
-overhead of page faults, which involve a user/kernel transition.
-Operating systems can reduce this cost by allocating a batch of 
-consecutive pages per
-page fault instead of one page and by specializing the kernel
-entry/exit code for such page-faults.
+Como as aplicações costumam solicitar mais memória do que realmente precisam, a alocação
+preguiçosa é vantajosa: o núcleo não precisa fazer nenhum trabalho para
+páginas que a aplicação nunca usa.
+Além disso, se a aplicação está
+pedindo para aumentar o espaço de endereços significativamente, então \lstinline{sbrk} 
+sem alocação preguiçosa é
+caro: se uma aplicação pede um gigabyte de memória,
+o núcleo precisa alocar e zerar 262.144 páginas de 4096 bytes.
+A alocação preguiçosa permite que esse custo
+seja diluído ao longo do tempo. Por outro lado, a alocação preguiçosa
+incorre na sobrecarga extra de falhas de página, que envolvem uma transição entre usuário/núcleo.
+Os sistemas operacionais podem reduzir esse custo alocando um lote de 
+páginas consecutivas por
+falha de página, em vez de uma única página, e especializando o código de entrada/saída do núcleo
+para tais falhas de página.
 
-Yet another widely-used feature that exploits page faults is
-\indextext{demand paging}.  In \lstinline{exec}, xv6 loads all 
-of an application's text
-and data into memory before starting
-the application.  Since applications
-can be large and reading from disk takes time, this startup cost can
-be noticeable to users. To
-decrease startup time, a modern kernel doesn't initially load
-the executable file into memory, but just creates the user page table with
-all PTEs marked invalid. The kernel starts the program running;
-each time the program uses a page for the first time, a page
-fault occurs, and in response
-the kernel reads the content of the page from disk and
-maps it into the user address space.  Like COW fork and lazy
-allocation, the kernel can implement this feature transparently to
-applications.
+Outra característica amplamente utilizada que explora falhas de página é
+\indextext{paginação sob demanda}. No \lstinline{exec}, o xv6 carrega todo 
+o texto
+e dados de uma aplicação na memória antes de iniciar
+a aplicação. Como as aplicações
+podem ser grandes e ler do disco leva tempo, esse custo de inicialização pode
+ser notável para os usuários. Para
+diminuir o tempo de inicialização, um núcleo moderno não carrega inicialmente
+o arquivo executável na memória, mas apenas cria a tabela de páginas do usuário com
+todos os PTEs marcados como inválidos. O núcleo inicia o programa;
+cada vez que o programa usa uma página pela primeira vez, ocorre uma falha de página,
+e em resposta
+o núcleo lê o conteúdo da página do disco e
+mapeia na memória do espaço de endereços do usuário. Assim como o fork COW e a alocação
+preguiçosa, o núcleo pode implementar essa característica de forma transparente para
+as aplicações.
 
-The programs running on a computer may need more memory than the
-computer has RAM. To cope gracefully, the operating system may
-implement \indextext{paging to disk}. The idea is to store only a
-fraction of user pages in RAM, and to store the rest on disk in a
-\indextext{paging area}. The kernel marks PTEs that correspond to
-memory stored in the paging area (and thus not in RAM) as invalid. If
-an application tries to use one of the pages that has been {\it paged
-  out} to disk, the application will incur a page fault, and the page
-must be {\it paged in}: the kernel trap handler will allocate a page
-of physical RAM, read the page from disk into the RAM, and modify the
-relevant PTE to point to the RAM.
+Os programas em execução em um computador podem precisar de mais memória do que a
+RAM disponível. Para lidar com isso de forma adequada, o sistema operacional pode
+implementar \indextext{paginação para disco}. A ideia é armazenar apenas uma
+fração das páginas do usuário na RAM e armazenar o restante no disco em uma
+\indextext{área de paginação}. O núcleo marca os PTEs que correspondem à
+memória armazenada na área de paginação (e, portanto, não na RAM) como inválidos. Se
+uma aplicação tentar usar uma das páginas que foi {\it paginada
+  para fora} para o disco, a aplicação sofrerá uma falha de página, e a página
+precisará ser {\it paginada para dentro}: o manipulador de trap do núcleo alocará uma página
+de RAM física, lerá a página do disco para a RAM e modificará o
+PTE relevante para apontar para a RAM.
 
-What happens if a page needs to be paged in, but there is no free
-physical RAM? In that case, the kernel must first free a physical page
-by paging it out or {\it evicting} it to the paging area on disk, and
-marking the PTEs referring to that physical page as invalid. Eviction
-is expensive, so paging performs best if it's infrequent: if
-applications use only a subset of their memory pages and the union of
-the subsets fits in RAM. This property is often referred to as having
-good locality of reference. As with many virtual memory techniques,
-kernels usually implement paging to disk in a way that's transparent
-to applications.
+O que acontece se uma página precisar ser paginada para dentro, mas não houver RAM física
+livre? Nesse caso, o núcleo deve primeiro liberar uma página física
+paginando-a para fora ou {\it expulsando-a} para a área de paginação no disco, e
+marcando os PTEs que se referem a essa página física como inválidos. A expulsão
+é cara, então a paginação tem melhor desempenho se for infrequente: se
+as aplicações usarem apenas um subconjunto de suas páginas de memória e a união dos
+subconjuntos couber na RAM. Essa propriedade é frequentemente referida como tendo
+boa localidade de referência. Assim como muitas técnicas de memória virtual,
+os núcleos geralmente implementam a paginação para disco de uma maneira que é transparente
+para as aplicações.
 
-Computers often operate with little or no {\it free} physical memory,
-regardless of how much RAM the hardware provides. For example, cloud
-providers multiplex many customers on a single machine to use their
-hardware cost-effectively. As another example, users run many
-applications on smart phones in a small amount of physical memory. In
-such settings allocating a page may require first evicting an existing
-page. Thus, when free physical memory is scarce, allocation is
-expensive.
+Os computadores frequentemente operam com pouca ou nenhuma memória física {\it livre},
+independentemente de quanta RAM o hardware fornece. Por exemplo, provedores de nuvem
+multiplexam muitos clientes em uma única máquina para utilizar seus
+custos de hardware de forma eficaz. Como outro exemplo, usuários executam muitos
+aplicativos em smartphones com uma pequena quantidade de memória física. Em
+tais configurações, alocar uma página pode exigir primeiro expulsar uma página existente. Assim, quando a memória física livre é escassa, a alocação é
+cara.
 
-Lazy allocation and demand paging are particularly advantageous when
-free memory is scarce and programs actively use only a fraction of
-their allocated memory. These techniques can also avoid the work
-wasted when a page is allocated or loaded but either never used or
-evicted before it can be used.
+A alocação preguiçosa e a paginação sob demanda são particularmente vantajosas quando
+a memória livre é escassa e os programas utilizam ativamente apenas uma fração de
+sua memória alocada. Essas técnicas também podem evitar o trabalho
+desperdiçado quando uma página é alocada ou carregada, mas nunca usada ou
+expulsa antes que possa ser utilizada.
 
-Other features that combine paging and page-fault exceptions include
-automatically extending stacks and \indextext{memory-mapped files},
-which are files that a program mapped into its address space using
-the \texttt{mmap} system call so that the program can read and write
-them using load and store instructions.
+Outras características que combinam paginação e exceções de falha de página incluem
+a extensão automática de pilhas e \indextext{arquivos mapeados na memória},
+que são arquivos que um programa mapeou em seu espaço de endereços usando
+a chamada de sistema \texttt{mmap} para que o programa possa lê-los e escrevê-los
+usando instruções de carregamento e armazenamento.
 
-\section{Real world}
+\section{Mundo real}
 
-The trampoline and trapframe may seem excessively complex. A driving
-force is that the RISC-V intentionally does as little as it can when
-forcing a trap, to allow the possibility of very fast trap handling,
-which turns out to be important. As a result, the first few
-instructions of the kernel trap handler effectively have to execute in
-the user environment: the user page table, and user register contents.
-And the trap handler is initially ignorant of useful facts such as the
-identity of the process that's running or the address of the kernel
-page table. A solution is possible because RISC-V provides protected
-places in which the kernel can stash away information before entering
-user space: the {\tt sscratch} register, and user page table entries
-that point to kernel memory but are protected by lack of \lstinline{PTE_U}.
-Xv6's trampoline and trapframe exploit these RISC-V features.
+O trampolim e o trapframe podem parecer excessivamente complexos. Uma força motriz é que o RISC-V intencionalmente faz o mínimo possível ao forçar uma trap, para permitir a possibilidade de um 
+tratamento de trap muito rápido, o que se mostra importante. Como resultado, as primeiras instruções do manipulador de trap do núcleo efetivamente têm que ser executadas no ambiente do usuário: a 
+tabela de páginas do usuário e o conteúdo dos registradores do usuário.
+E o manipulador de trap inicialmente ignora fatos úteis, como a
+identidade do processo que está em execução ou o endereço da tabela de páginas do núcleo. Uma solução é possível porque o RISC-V fornece lugares protegidos nos quais o núcleo pode armazenar 
+informações antes de entrar no espaço do usuário: o registrador {\tt sscratch}, e entradas de tabela de páginas do usuário
+que apontam para a memória do núcleo, mas são protegidas pela falta de \lstinline{PTE_U}.
+O trampolim e o trapframe do Xv6 exploram esses recursos do RISC-V.
 
-The need for special trampoline pages could be eliminated if kernel
-memory were mapped into every process's user page table (with
-\lstinline{PTE_U} clear).
-That would
-also eliminate the need for a page table switch when trapping from
-user space into the kernel. That in turn would allow system call
-implementations in the kernel to take advantage of the current
-process's user memory being mapped, allowing kernel code to directly
-dereference user pointers. Many operating systems have used these ideas to
-increase efficiency. Xv6 avoids them in order to reduce the chances of
-security bugs in the kernel due to inadvertent use of user pointers,
-and to reduce some complexity that would be required to ensure that
-user and kernel virtual addresses don't overlap.
+A necessidade de páginas de trampolim especiais poderia ser eliminada se a memória do núcleo
+fosse mapeada na tabela de páginas do usuário de cada processo (com
+\lstinline{PTE_U} apagado).
+Isso também eliminaria a necessidade de uma troca de tabela de páginas ao fazer uma trap do
+espaço do usuário para o núcleo. Isso, por sua vez, permitiria que implementações de chamadas de sistema no núcleo aproveitassem a memória do usuário do processo atual sendo mapeada, permitindo que 
+o código do núcleo desreferencie diretamente ponteiros do usuário. Muitos sistemas operacionais usaram essas ideias para
+aumentar a eficiência. O Xv6 as evita para reduzir as chances de
+erros de segurança no núcleo devido ao uso inadvertido de ponteiros do usuário,
+e para reduzir alguma complexidade que seria necessária para garantir que
+endereços virtuais do usuário e do núcleo não se sobreponham.
 
-Production operating systems implement copy-on-write fork, lazy
-allocation, demand paging, paging to disk, memory-mapped files, etc.
-Furthermore, production operating systems try to store
-something useful in all areas of physical memory, typically caching
-file content in memory that isn't used by processes.
+Sistemas operacionais de produção implementam fork de cópia sob demanda, alocação
+preguiçosa, paginação sob demanda, paginação para disco, arquivos mapeados na memória, etc.
+Além disso, sistemas operacionais de produção tentam armazenar
+algo útil em todas as áreas da memória física, normalmente armazenando em cache
+o conteúdo de arquivos na memória que não está sendo usado por processos.
 
-Production operating systems also provide applications with system
-calls to manage their address spaces and implement their own
-page-fault handling through the {\tt mmap}, {\tt munmap}, and {\tt
-  sigaction} system calls, as well as providing calls to pin memory
-into RAM (see {\tt mlock}) and to advise the kernel how an application
-plans to use its memory (see {\tt madvise}).
+Sistemas operacionais de produção também fornecem às aplicações chamadas de sistema
+para gerenciar seus espaços de endereços e implementar seu próprio
+tratamento de falhas de página através das chamadas de sistema {\tt mmap}, {\tt munmap} e {\tt
+  sigaction}, além de fornecer chamadas para fixar a memória
+na RAM (veja {\tt mlock}) e para aconselhar o núcleo sobre como uma aplicação
+planeja usar sua memória (veja {\tt madvise}).
 
-\section{Exercises}
+\section{Exercícios}
 
 \begin{enumerate}
 
-\item The functions {\tt copyin} and {\tt copyinstr} walk the user
-  page table in software.  Set up the kernel page table so that the
-  kernel has the user program mapped, and {\tt copyin} and {\tt
-    copyinstr} can use {\tt memcpy} to copy system call arguments into
-  kernel space, relying on the hardware to do the page table walk.
+\item As funções {\tt copyin} e {\tt copyinstr} percorrem a tabela de páginas do usuário em software. Configure a tabela de páginas do núcleo para que o núcleo tenha o programa do usuário mapeado, 
+e {\tt copyin} e {\tt
+    copyinstr} possam usar {\tt memcpy} para copiar argumentos de chamadas de sistema para o espaço do núcleo, confiando no hardware para percorrer a tabela de páginas.
 
-\item Implement lazy memory allocation.
+\item Implemente alocação de memória preguiçosa.
 
-\item Implement COW fork.
+\item Implemente o fork COW.
 
-\item Is there a way to eliminate the special {\tt
-  TRAPFRAME} page mapping in every user address space? For
-  example, could
-  {\tt uservec} be modified to simply push the 32 user registers
-  onto the kernel stack, or store them in the {\tt proc}
-  structure?
+\item Existe uma maneira de eliminar o mapeamento especial da página {\tt
+  TRAPFRAME} em cada espaço de endereços do usuário? Por
+  exemplo, poderia
+  {\tt uservec} ser modificado para simplesmente empurrar os 32 registradores do usuário
+  na pilha do núcleo, ou armazená-los na estrutura {\tt proc}?
 
-\item Could xv6 be modified to eliminate the special {\tt
-  TRAMPOLINE} page mapping?
+\item O xv6 poderia ser modificado para eliminar o mapeamento especial da página {\tt
+  TRAMPOLINE}?
 
-\item Implement {\tt mmap}.
+\item Implemente {\tt mmap}.
 
 \end{enumerate}
