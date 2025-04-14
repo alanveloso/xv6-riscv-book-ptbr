@@ -1,450 +1,395 @@
-\chapter{File system}
+\chapter{Sistema de arquivos}
 \label{CH:FS}
-%         is it process or kernel thread?
+%         é processo ou thread de kernel?
 % 
-%         the logging text (and some of the buffer text) assumes the reader
-%         knows a fair amount about how inodes and directories work,
-%         but they are introduced later.
+%         o texto sobre logging (e parte do texto sobre buffer) assume que o leitor
+%         já conhece bastante sobre como inodes e diretórios funcionam,
+%         mas eles são introduzidos depois.
 % 
-% 	have to decide on processor vs CPU.
+% 	é necessário decidir entre processador e CPU.
 % 	
-% 	be sure to say buffer, not block 
+% 	certifique-se de usar buffer, não bloco 
 % 
-% 	Mount
+% 	Montagem
 
-The purpose of a file system is to organize and store data. File systems
-typically support sharing of data among users and applications, as well as
-\indextext{persistence}
-so that data is still available after a reboot.
+O propósito de um sistema de arquivos é organizar e armazenar dados. Sistemas de arquivos
+tipicamente suportam compartilhamento de dados entre usuários e aplicações, bem como
+\indextext{persistência}
+para que os dados ainda estejam disponíveis após uma reinicialização.
 
-The xv6 file system provides Unix-like files, directories, and pathnames
-(see Chapter~\ref{CH:UNIX}), and stores its data on a virtio disk for
-persistence. The file system addresses
-several challenges:
+O sistema de arquivos do xv6 oferece arquivos, diretórios e nomes de caminho semelhantes aos do Unix
+(consulte o Capítulo~\ref{CH:UNIX}), e armazena seus dados em um disco virtio para
+garantir a persistência. O sistema de arquivos enfrenta
+vários desafios:
 \begin{itemize}
-  
-\item The file system needs on-disk data structures to represent the tree
-of named directories and files, to record the identities of the
-blocks that hold each file's content, and to record which areas
-of the disk are free.
-\item The file system must support
-\indextext{crash recovery}.
-That is, if a crash (e.g., power failure) occurs, the file system must
-still work correctly after a restart. The risk is that a crash might
-interrupt a sequence of updates and leave inconsistent on-disk data
-structures (e.g., a block that is both used in a file and marked free).
-\item Different processes may operate on the file system at the same time,
-so the file-system code must coordinate to maintain invariants.
-\item Accessing a disk is orders of magnitude slower than accessing
-memory, so the file system must maintain an in-memory cache of
-popular blocks.
+
+\item O sistema de arquivos precisa de estruturas de dados no disco para representar a árvore
+de diretórios e arquivos nomeados, para registrar a identidade dos
+blocos que armazenam o conteúdo de cada arquivo, e para registrar quais áreas
+do disco estão livres.
+\item O sistema de arquivos deve suportar
+\indextext{recuperação de falhas}.
+Ou seja, se ocorrer uma falha (por exemplo, falta de energia), o sistema de arquivos deve
+ainda funcionar corretamente após um reinício. O risco é que uma falha possa
+interromper uma sequência de atualizações e deixar as estruturas de dados no disco inconsistentes
+(por exemplo, um bloco que é usado em um arquivo e marcado como livre).
+\item Diferentes processos podem operar no sistema de arquivos ao mesmo tempo,
+portanto o código do sistema de arquivos deve coordenar essas operações para manter os invariantes.
+\item O acesso ao disco é ordens de magnitude mais lento que o acesso
+à memória, portanto o sistema de arquivos deve manter um cache na memória
+dos blocos mais utilizados.
 
 \end{itemize}
 
-The rest of this chapter explains how xv6 addresses these challenges.
+O restante deste capítulo explica como o xv6 lida com esses desafios.
+
 %% 
 %%  -------------------------------------------
 %% 
-\section{Overview}
+\section{Visão geral}
 
-The xv6 file system implementation is
-organized in seven layers, shown in 
-Figure~\ref{fig:fslayer}.
-The disk layer reads and writes blocks on an virtio hard drive.
-The buffer cache layer caches disk blocks and synchronizes access to them,
-making sure that only one kernel process at a time can modify the
-data stored in any particular block.  The logging layer allows higher
-layers to wrap updates to several blocks in a
-\indextext{transaction},
-and ensures that the blocks are updated atomically in the
-face of crashes (i.e., all of them are updated or none).
-The inode layer provides individual files, each represented as an
+A implementação do sistema de arquivos do xv6 é
+organizada em sete camadas, conforme mostrado na
+Figura~\ref{fig:fslayer}.
+A camada de disco lê e escreve blocos em um disco rígido virtio.
+A camada de cache de buffer armazena em cache os blocos do disco e sincroniza o acesso a eles,
+garantindo que apenas um processo do kernel por vez possa modificar os
+dados armazenados em um determinado bloco. A camada de logging permite que camadas superiores
+agrupem atualizações de vários blocos em uma
+\indextext{transação},
+e garante que os blocos sejam atualizados atomicamente
+em caso de falhas (isto é, ou todos são atualizados ou nenhum).
+A camada de inode fornece arquivos individuais, cada um representado como um
 \indextext{inode}
-with a unique i-number
-and some blocks holding the file's data.  The directory
-layer implements each directory as a special kind of
-inode whose content is a sequence of directory entries, each of which contains a
-file's name and i-number.
-The pathname layer provides
-hierarchical path names like
+com um número-i único
+e alguns blocos contendo os dados do arquivo. A camada de diretório
+implementa cada diretório como um tipo especial de
+inode cujo conteúdo é uma sequência de entradas de diretório, cada uma contendo o
+nome de um arquivo e seu número-i.
+A camada de nomes de caminho fornece
+nomes de caminho hierárquicos como
 \lstinline{/usr/rtm/xv6/fs.c},
-and resolves them with recursive lookup.
-The file descriptor layer abstracts many Unix resources (e.g., pipes, devices,
-files, etc.) using the file system interface, simplifying the lives of
-application programmers.
+e os resolve com busca recursiva.
+A camada de descritor de arquivo abstrai muitos recursos Unix (por exemplo, pipes, dispositivos,
+arquivos etc.) usando a interface do sistema de arquivos, simplificando a vida dos
+programadores de aplicações.
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/fslayer.pdf}
-\caption{Layers of the xv6 file system.}
+\caption{Camadas do sistema de arquivos do xv6.}
 \label{fig:fslayer}
 \end{figure}
 
-Disk hardware traditionally presents the data on the
-disk as a numbered sequence of 512-byte 
-\textit{blocks} 
-\index{block}
-(also called 
-\textit{sectors}): 
-\index{sector}
-sector 0 is the first 512 bytes, sector 1 is the next, and so on. The block size
-that an operating system uses for its file system maybe different than the
-sector size that a disk uses, but typically the block size is a multiple of the
-sector size. Xv6 holds copies of blocks that it has read into memory
-in objects of type
+O hardware de disco tradicionalmente apresenta os dados no
+disco como uma sequência numerada de 
+\textit{blocos} 
+de 512 bytes
+\index{bloco}
+(também chamados de
+\textit{setores}): 
+\index{setor}
+o setor 0 são os primeiros 512 bytes, o setor 1 são os próximos, e assim por diante. O tamanho do bloco
+que um sistema operacional usa para seu sistema de arquivos pode ser diferente do
+tamanho do setor usado pelo disco, mas tipicamente o tamanho do bloco é um múltiplo do
+tamanho do setor. O xv6 mantém cópias dos blocos que foram lidos para a memória
+em objetos do tipo
 \lstinline{struct buf}
-The
-data stored in this structure is sometimes out of sync with the disk: it might have
-not yet been read in from disk (the disk is working on it but hasn't returned
-the sector's content yet), or it might have been updated by software
-but not yet written to the disk.
+\lineref{kernel/buf.h:/^struct.buf/}.
+Os
+dados armazenados nessa estrutura às vezes não estão sincronizados com o disco: podem ainda
+não ter sido lidos do disco (o disco está processando mas ainda não retornou o conteúdo
+do setor), ou podem ter sido atualizados pelo software
+mas ainda não foram escritos no disco.
 
-The file system must have a plan for where it stores inodes and
-content blocks on the disk.
-To do so, xv6 divides the disk into several
-sections, as 
-Figure~\ref{fig:fslayout} shows.
-The file system does not use
-block 0 (it holds the boot sector).  Block 1 is called the 
-\indextext{superblock}; 
-it contains metadata about the file system (the file system size in blocks, the
-number of data blocks, the number of inodes, and the number of blocks in the
-log).  Blocks starting at 2 hold the log.  After the log are the inodes, with multiple inodes per block.  After
-those come bitmap blocks tracking which data blocks are in use.
-The remaining blocks are data blocks; each is either marked
-free in the bitmap block, or holds content for a file or directory.
-The superblock is filled in by a separate program, called
+O sistema de arquivos precisa de um plano para onde armazenar os inodes e
+blocos de conteúdo no disco.
+Para isso, o xv6 divide o disco em várias
+seções, conforme mostra a
+Figura~\ref{fig:fslayout}.
+O sistema de arquivos não usa
+o bloco 0 (ele contém o setor de boot). O bloco 1 é chamado de 
+\indextext{superbloco}; 
+ele contém metadados sobre o sistema de arquivos (o tamanho do sistema de arquivos em blocos, o
+número de blocos de dados, o número de inodes e o número de blocos no
+log). Os blocos a partir do 2 armazenam o log. Após o log vêm os inodes, com vários inodes por bloco. Depois
+disso vêm os blocos de bitmap que rastreiam quais blocos de dados estão em uso.
+Os blocos restantes são blocos de dados; cada um está marcado
+como livre no bloco de bitmap ou contém conteúdo de um arquivo ou diretório.
+O superbloco é preenchido por um programa separado, chamado
 \indexcode{mkfs},
-which builds an initial file system.
+que constrói um sistema de arquivos inicial.
 
-The rest of this chapter discusses each layer, starting with the
-buffer cache.
-Look out for situations where well-chosen abstractions at lower layers
-ease the design of higher ones.
+O restante deste capítulo discute cada camada, começando com o
+cache de buffer.
+Fique atento às situações em que boas abstrações nas camadas inferiores
+facilitam o projeto das superiores.
 %% 
 %%  -------------------------------------------
 %% 
-\section{Buffer cache layer}
+\section{Camada de cache de buffer}
 \label{s:bcache}
 
-The buffer cache has two jobs: (1) synchronize access to disk blocks to ensure
-that only one copy of a block is in memory and that only one kernel thread at a time
-uses that copy; (2) cache popular blocks so that they don't need to be re-read from
-the slow disk. The code is in
+A cache de buffer tem dois trabalhos: (1) sincronizar o acesso aos blocos de disco para garantir
+que apenas uma cópia de um bloco esteja na memória e que apenas uma thread do kernel por vez
+use essa cópia; (2) armazenar em cache blocos populares para que eles não precisem ser lidos novamente
+do disco lento. O código está em
 \lstinline{bio.c}.
 
-The main interface exported by the buffer cache consists of
+A interface principal exportada pela cache de buffer consiste em
 \indexcode{bread}
-and
+e
 \indexcode{bwrite};
-the former obtains a
+a primeira obtém um
 \indextext{buf}
-containing a copy of a block which can be read or modified in memory, and the
-latter writes a modified buffer to the appropriate block on the disk.
-A kernel thread must release a buffer by calling
+contendo uma cópia de um bloco que pode ser lido ou modificado em memória, e a
+segunda escreve um buffer modificado no bloco apropriado no disco.
+Uma thread do kernel deve liberar um buffer chamando
 \indexcode{brelse}
-when it is done with it.
-The buffer cache uses a per-buffer sleep-lock to ensure
-that only one thread at a time uses each buffer
-(and thus each disk block);
+quando terminar de usá-lo.
+A cache de buffer usa um sleep-lock por buffer para garantir
+que apenas uma thread por vez use cada buffer
+(e, portanto, cada bloco de disco);
 \lstinline{bread}
-returns a locked buffer, and
+retorna um buffer bloqueado, e
 \lstinline{brelse}
-releases the lock.
+libera o lock.
 
-Let's return to the buffer cache.
-The buffer cache has a fixed number of buffers to hold disk blocks,
-which means that if the file system asks for a block that is not
-already in the cache, the buffer cache must recycle a buffer currently
-holding some other block. The buffer cache recycles the
-least recently used buffer for the new block. The assumption is that
-the least recently used buffer is the one least likely to be used
-again soon.
+Vamos voltar à cache de buffer.
+A cache de buffer tem um número fixo de buffers para armazenar blocos de disco,
+o que significa que se o sistema de arquivos solicitar um bloco que não está
+já na cache, a cache de buffer deve reciclar um buffer que atualmente
+contenha algum outro bloco. A cache de buffer recicla o
+buffer menos recentemente usado para o novo bloco. A suposição é que
+o buffer menos recentemente usado é o menos provável de ser usado
+novamente em breve.
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/fslayout.pdf}
-\caption{Structure of the xv6 file system. }
+\caption{Estrutura do sistema de arquivos xv6.}
 \label{fig:fslayout}
 \end{figure}
 %% 
 %%  -------------------------------------------
 %% 
-\section{Code: Buffer cache}
+\section{Código: Cache de buffer}
 
-The buffer cache is a doubly-linked list of buffers.
-The function
+A cache de buffer é uma lista duplamente encadeada de buffers.
+A função
 \indexcode{binit},
-called by
+chamada por
 \indexcode{main}
-initializes the list with the
+\lineref{kernel/main.c:/binit/},
+inicializa a lista com os
 \indexcode{NBUF}
-buffers in the static array
+buffers no array estático
 \lstinline{buf}
-All other access to the buffer cache refer to the linked list via
+\linerefs{kernel/bio.c:/Create.linked.list/,/^..}/}.
+Todo o restante do acesso à cache de buffer se refere à lista encadeada via
 \indexcode{bcache.head},
-not the
-\lstinline{buf}
-array.
+não ao array
+\lstinline{buf}.
 
-A buffer has two state fields associated with it.
-The field
+Um buffer tem dois campos de estado associados a ele.
+O campo
 \indexcode{valid}
-indicates that the buffer contains a copy of the block.
-The field \indexcode{disk}
-indicates that the buffer content has been handed to
-the disk, which may change the buffer (e.g., write
-data from the disk into \lstinline{data}).
+indica que o buffer contém uma cópia do bloco.
+O campo \indexcode{disk}
+indica que o conteúdo do buffer foi entregue ao
+disco, o qual pode alterar o buffer (por exemplo, escrever
+dados do disco em \lstinline{data}).
 
 \lstinline{bread}
-calls
+\lineref{kernel/bio.c:/^bread/}
+chama
 \indexcode{bget}
-to get a buffer for the given sector
-If the buffer needs to be read from disk,
+para obter um buffer para o setor fornecido
+\lineref{kernel/bio.c:/b.=.bget/}.
+Se o buffer precisar ser lido do disco,
 \lstinline{bread}
-calls
+chama
 \indexcode{virtio_disk_rw}
-to do that before returning the buffer.
+para fazer isso antes de retornar o buffer.
 
 \lstinline{bget}
-scans the buffer list for a buffer with the given device and sector numbers
-If there is such a buffer,
+\lineref{kernel/bio.c:/^bget/}
+escaneia a lista de buffers por um buffer com os números de dispositivo e setor fornecidos
+\linerefs{kernel/bio.c:/Is.the.block.already/,/^..}/}.
+Se existir tal buffer,
 \indexcode{bget}
-acquires the sleep-lock for the buffer.
+adquire o sleep-lock do buffer.
 \lstinline{bget}
-then returns the locked buffer.
+então retorna o buffer bloqueado.
 
-If there is no cached buffer for the given sector,
+Se não houver buffer em cache para o setor fornecido,
 \indexcode{bget}
-must make one, possibly reusing a buffer that held
-a different sector.
-It scans the buffer list a second time, looking for a buffer
-that is not in use (\lstinline{b->refcnt = 0});
-any such buffer can be used.
+deve criar um, possivelmente reutilizando um buffer que armazenava
+um setor diferente.
+Ele escaneia a lista de buffers uma segunda vez, procurando por um buffer
+que não esteja em uso (\lstinline{b->refcnt = 0});
+qualquer buffer assim pode ser usado.
 \lstinline{bget}
-edits the buffer metadata to record the new device and sector number
-and acquires its sleep-lock.
-Note that the assignment
+edita os metadados do buffer para registrar o novo número de dispositivo e setor
+e adquire seu sleep-lock.
+Note que a atribuição
 \lstinline{b->valid = 0}
-ensures that
+garante que
 \lstinline{bread}
-will read the block data from disk
-rather than incorrectly using the buffer's previous contents.
+irá ler os dados do bloco do disco
+em vez de usar incorretamente o conteúdo anterior do buffer.
 
-It is important that there is at most one cached buffer per
-disk sector, to ensure that readers see writes, and because the
-file system uses locks on buffers for synchronization.
+É importante que haja no máximo um buffer em cache por
+setor de disco, para garantir que leitores vejam as escritas, e porque o
+sistema de arquivos usa locks nos buffers para sincronização.
 \lstinline{bget}
-ensures this invariant by holding the
-\lstinline{bache.lock}
+garante esse invariante mantendo o
 \lstinline{bcache.lock}
-continuously from the first loop's check of whether the
-block is cached through the second loop's declaration that
-the block is now cached (by setting
+continuamente desde a verificação no primeiro loop de se o
+bloco está em cache até a declaração no segundo loop de que
+o bloco agora está em cache (através da atribuição de
 \lstinline{dev},
 \lstinline{blockno},
-and
+e
 \lstinline{refcnt}).
-This causes the check for a block's presence and (if not
-present) the designation of a buffer to hold the block to
-be atomic.
+Isso faz com que a verificação da presença de um bloco e (se não
+presente) a designação de um buffer para armazenar o bloco sejam atômicas.
 
-It is safe for
+É seguro para
 \lstinline{bget}
-to acquire the buffer's sleep-lock outside of the 
-\lstinline{bcache.lock}
-critical section,
-since the non-zero
+adquirir o sleep-lock do buffer fora da
+seção crítica protegida por \lstinline{bcache.lock},
+já que o valor não-zero de
 \lstinline{b->refcnt}
-prevents the buffer from being re-used for a different disk block.
-The sleep-lock protects reads
-and writes of the block's buffered content, while the
+impede que o buffer seja reutilizado para um bloco de disco diferente.
+O sleep-lock protege leituras
+e escritas do conteúdo do buffer, enquanto o
 \lstinline{bcache.lock}
-protects information about which blocks are cached.
+protege informações sobre quais blocos estão em cache.
 
-If all the buffers are busy, then too many processes are
-simultaneously executing file system calls;
+Se todos os buffers estiverem ocupados, então muitos processos estão
+simultaneamente executando chamadas ao sistema de arquivos;
 \lstinline{bget}
-panics.
-A more graceful response might be to sleep until a buffer became free,
-though there would then be a possibility of deadlock.
+entra em pânico.
+Uma resposta mais elegante poderia ser dormir até que um buffer ficasse livre,
+embora isso traria a possibilidade de deadlock.
 
-Once
+Uma vez que
 \indexcode{bread}
-has read the disk (if needed) and returned the
-buffer to its caller, the caller has
-exclusive use of the buffer and can read or write the data bytes.
-If the caller does modify the buffer, it must call
+tenha lido o disco (se necessário) e retornado o
+buffer ao seu chamador, o chamador tem
+uso exclusivo do buffer e pode ler ou escrever os bytes de dados.
+Se o chamador modificar o buffer, ele deve chamar
 \indexcode{bwrite}
-to write the changed data to disk before releasing the buffer.
+para gravar os dados alterados no disco antes de liberar o buffer.
 \lstinline{bwrite}
-calls
+\lineref{kernel/bio.c:/^bwrite/}
+chama
 \indexcode{virtio_disk_rw}
-to talk to the disk hardware.
+para se comunicar com o hardware de disco.
 
-When the caller is done with a buffer,
-it must call
+Quando o chamador termina de usar um buffer,
+ele deve chamar
 \indexcode{brelse}
-to release it. 
-(The name
+para liberá-lo.
+(O nome
 \lstinline{brelse},
-a shortening of
+uma abreviação de
 b-release,
-is cryptic but worth learning:
-it originated in Unix and is used in BSD, Linux, and Solaris too.)
+é críptico, mas vale a pena aprender:
+ele se originou no Unix e é usado também no BSD, Linux e Solaris.)
 \lstinline{brelse}
-releases the sleep-lock and
-moves the buffer
-to the front of the linked list
-Moving the buffer causes the
-list to be ordered by how recently the buffers were used (meaning released):
-the first buffer in the list is the most recently used,
-and the last is the least recently used.
-The two loops in
+\lineref{kernel/bio.c:/^brelse/}
+libera o sleep-lock e
+move o buffer
+para a frente da lista encadeada
+\linerefs{kernel/bio.c:/b->next->prev.=.b->prev/,/bcache.head.next.=.b/}.
+Mover o buffer faz com que a
+lista fique ordenada por quão recentemente os buffers foram usados (ou seja, liberados):
+o primeiro buffer na lista é o mais recentemente usado,
+e o último é o menos recentemente usado.
+Os dois loops em
 \lstinline{bget}
-take advantage of this:
-the scan for an existing buffer must process the entire list
-in the worst case, but checking the most recently used buffers
-first (starting at
+aproveitam isso:
+a varredura por um buffer existente pode ter que processar toda a lista
+no pior caso, mas verificar os buffers mais recentemente usados
+primeiro (começando em
 \lstinline{bcache.head}
-and following
-\lstinline{next}
-pointers) will reduce scan time when there is good locality of reference.
-The scan to pick a buffer to reuse picks the least recently used
-buffer by scanning backward
-(following 
-\lstinline{prev}
-pointers).
+e seguindo os ponteiros
+\lstinline{next})
+reduz o tempo de varredura quando há boa localidade de referência.
+A varredura para escolher um buffer a ser reutilizado escolhe o buffer menos recentemente usado
+fazendo a varredura para trás
+(seguindo os ponteiros
+\lstinline{prev}).
 %% 
 %%  -------------------------------------------
 %% 
-\section{Logging layer}
+\section{Camada de logging}
 
-One of the most interesting problems in file system design is crash
-recovery. The problem arises because many file-system operations
-involve multiple writes to the disk, and a crash after a subset of the
-writes may leave the on-disk file system in an inconsistent state. For
-example, suppose a crash occurs during file truncation (setting
-the length of a file to zero and freeing its content blocks).
-Depending on the order of the disk writes, the crash 
-may either leave an inode with a reference
-to a content block that is marked free,
-or it may leave an allocated but unreferenced content block.
+Um dos problemas mais interessantes no design de sistemas de arquivos é a recuperação após falhas. O problema surge porque muitas operações do sistema de arquivos envolvem múltiplas gravações no 
+disco, e uma falha após apenas parte dessas gravações pode deixar o sistema de arquivos em disco em um estado inconsistente. Por exemplo, suponha que ocorra uma falha durante o truncamento de um 
+arquivo (definindo seu tamanho como zero e liberando seus blocos de conteúdo). Dependendo da ordem das gravações no disco, a falha pode deixar um inode com uma referência a um bloco de conteúdo 
+que está marcado como livre, ou pode deixar um bloco alocado, porém não referenciado.
 
-The latter is relatively benign, but an inode that refers to a freed
-block is likely to cause serious problems after a reboot.  After reboot, the
-kernel might allocate that block to another file, and now we have two different
-files pointing unintentionally to the same block.  If xv6 supported
-multiple users, this situation could be a security problem, since the
-old file's owner would be able to read and write blocks in the
-new file, owned by a different user.
+O segundo caso é relativamente inofensivo, mas um inode que referencia um bloco já liberado pode causar sérios problemas após um reboot. Após reiniciar, o kernel pode alocar esse bloco para outro 
+arquivo, e agora temos dois arquivos diferentes apontando, inadvertidamente, para o mesmo bloco. Se o xv6 suportasse múltiplos usuários, isso poderia ser um problema de segurança, já que o dono do 
+arquivo antigo poderia ler e escrever nos blocos do novo arquivo, pertencente a outro usuário.
 
-Xv6 solves the problem of crashes during file-system operations with a
-simple form of logging. An xv6 system call does not directly write
-the on-disk file system data structures. Instead, it places a
-description of all the disk writes it wishes to make in a 
+O xv6 resolve o problema de falhas durante operações no sistema de arquivos com uma forma simples de logging. Uma chamada de sistema no xv6 não grava diretamente nas estruturas de dados do sistema 
+de arquivos no disco. Em vez disso, ela grava uma descrição de todas as operações de escrita que deseja realizar em um 
 \indextext{log} 
-on the disk. Once the system call has logged all of its writes, it writes a
-special 
+no disco. Uma vez que a chamada de sistema tenha registrado todas as suas gravações, ela grava um registro especial de 
 \indextext{commit}
-record to the disk indicating that the log contains
-a complete operation. At that point the system call copies the writes
-to the on-disk file system data structures. After those writes have
-completed, the system call erases the log on disk.
+no disco, indicando que o log contém uma operação completa. Nesse ponto, a chamada de sistema copia as gravações para as estruturas de dados reais no disco. Após essas gravações serem concluídas, 
+o log é apagado do disco.
 
-If the system should crash and reboot, the file-system code recovers
-from the crash as follows, before running any processes. If the log is
-marked as containing a complete operation, then the recovery code
-copies the writes to where they belong in the on-disk file system. If
-the log is not marked as containing a complete operation, the recovery
-code ignores the log.  The recovery code finishes by erasing
-the log.
+Se o sistema falhar e reiniciar, o código do sistema de arquivos realiza a recuperação da seguinte forma, antes de executar qualquer processo. Se o log estiver marcado como contendo uma operação 
+completa, então o código de recuperação copia as gravações para seus devidos locais no sistema de arquivos. Se o log não estiver marcado como completo, o código de recuperação simplesmente o 
+ignora. A recuperação finaliza apagando o log.
 
-Why does xv6's log solve the problem of crashes during file system
-operations? If the crash occurs before the operation commits, then the
-log on disk will not be marked as complete, the recovery code will
-ignore it, and the state of the disk will be as if the operation had
-not even started. If the crash occurs after the operation commits,
-then recovery will replay all of the operation's writes, perhaps
-repeating them if the operation had started to write them to the
-on-disk data structure. In either case, the log makes operations
-atomic with respect to crashes: after recovery, either all of the
-operation's writes appear on the disk, or none of them appear.
+Por que o log do xv6 resolve o problema de falhas durante operações no sistema de arquivos? Se a falha ocorrer antes do commit, o log não estará marcado como completo, o código de recuperação o 
+ignorará, e o estado do disco será como se a operação nunca tivesse iniciado. Se a falha ocorrer após o commit, então a recuperação irá repetir todas as gravações da operação, talvez reescrevendo 
+blocos já parcialmente atualizados. Em ambos os casos, o log torna as operações atômicas em relação a falhas: após a recuperação, ou todas as gravações da operação estão no disco, ou nenhuma está.
 %% 
 %% 
 %% 
-\section{Log design}
+\section{Design do log}
 
-The log resides at a known fixed location, specified in the superblock.
-It consists of a header block followed by a sequence
-of updated block copies (``logged blocks'').
-The header block contains an array of sector
-numbers, one for each of the logged blocks, and 
-the count of log blocks.
-The count in the header block on disk is either
-zero, indicating that there is no transaction in the log,
-or non-zero, indicating that the log contains a complete committed
-transaction with the indicated number of logged blocks.
-Xv6 writes the header
-block when a transaction commits, but not before, and sets the
-count to zero after copying the logged blocks to the file system.
-Thus a crash midway through a transaction will result in a
-count of zero in the log's header block; a crash after a commit
-will result in a non-zero count.
+O log reside em um local fixo e conhecido, especificado no superbloco. Ele consiste em um bloco de cabeçalho seguido por uma sequência de cópias de blocos atualizados (``blocos logados''). O bloco 
+de cabeçalho contém um array com números de setores, um para cada bloco logado, e a contagem de blocos no log. A contagem no bloco de cabeçalho no disco é zero, indicando que não há transação no 
+log, ou diferente de zero, indicando que o log contém uma transação completa e confirmada com a quantidade indicada de blocos. O xv6 grava o bloco de cabeçalho quando uma transação é confirmada, 
+mas não antes disso, e define a contagem como zero após copiar os blocos para o sistema de arquivos. Assim, uma falha no meio de uma transação resultará em uma contagem zero no cabeçalho; uma 
+falha após o commit resultará em uma contagem diferente de zero.
 
-Each system call's code indicates the start and end of the sequence of
-writes that must be atomic with respect to crashes.
-To allow concurrent execution of file-system operations
-by different processes,
-the logging system can accumulate the writes
-of multiple system calls into one transaction.
-Thus a single commit may involve the writes of multiple
-complete system calls.
-To avoid splitting a system call across transactions, the logging system
-only commits when no file-system system calls are underway.
+O código de cada chamada de sistema indica o início e fim da sequência de gravações que devem ser atômicas em relação a falhas. Para permitir a execução concorrente de chamadas de sistema por 
+diferentes processos, o sistema de logging pode acumular gravações de múltiplas chamadas em uma única transação. Assim, um único commit pode envolver as gravações de várias chamadas de sistema 
+completas. Para evitar que uma chamada de sistema seja dividida entre transações, o sistema de logging apenas faz commit quando não há chamadas de sistema de arquivos em andamento.
 
-The idea of committing several transactions together is known as 
+A ideia de agrupar várias transações em um único commit é chamada de 
 \indextext{group commit}.
-Group commit reduces the number of disk operations
-because it amortizes the fixed cost of a commit over multiple
-operations.
-Group commit also hands the disk system more concurrent writes
-at the same time, perhaps allowing the disk to write
-them all during a single disk rotation.
-Xv6's virtio driver doesn't support this kind of
+Group commit reduz o número de operações no disco porque amortiza o custo fixo de um commit entre várias operações. Ele também entrega múltiplas gravações concorrentes ao sistema de disco ao mesmo 
+tempo, possivelmente permitindo que o disco as grave todas em uma única rotação. O driver virtio do xv6 não suporta esse tipo de 
 \indextext{batching},
-but xv6's file system design allows for it.
+mas o design do sistema de arquivos do xv6 o permite.
 
-Xv6 dedicates a fixed amount of space on the disk to hold the log.
-The total number of blocks written by the system calls in a
-transaction must fit in that space.
-This has two consequences.
-No single system call
-can be allowed to write more distinct blocks than there is space
-in the log. This is not a problem for most system calls, but two
-of them can potentially write many blocks: 
+O xv6 dedica uma quantidade fixa de espaço no disco para armazenar o log. O número total de blocos gravados pelas chamadas de sistema em uma transação deve caber nesse espaço. Isso tem duas 
+consequências. Nenhuma chamada de sistema pode gravar mais blocos distintos do que o espaço disponível no log. Isso não é problema para a maioria das chamadas, mas duas delas podem gravar muitos 
+blocos:
 \indexcode{write}
-and
+e
 \indexcode{unlink}.
-A large file write may write many data blocks and many bitmap blocks
-as well as an inode block; unlinking a large file might write many
-bitmap blocks and an inode.
-Xv6's write system call breaks up large writes into multiple smaller
-writes that fit in the log,
-and 
+Uma gravação de arquivo grande pode gravar muitos blocos de dados, vários blocos de mapa de bits e um bloco de inode; remover um arquivo grande pode gravar vários blocos de mapa de bits e um 
+inode. A chamada de sistema \lstinline{write} do xv6 divide grandes gravações em várias menores que cabem no log, e 
 \lstinline{unlink}
-doesn't cause problems because in practice the xv6 file system uses
-only one bitmap block.
-The other consequence of limited log space
-is that the logging system cannot allow a system call to start
-unless it is certain that the system call's writes will
-fit in the space remaining in the log.
+não causa problemas porque na prática o sistema de arquivos do xv6 usa apenas um bloco de mapa de bits. A outra consequência do espaço limitado é que o sistema de logging não permite o início de 
+uma nova chamada de sistema a menos que tenha certeza de que suas gravações caberão no espaço restante do log.
 %% 
 %% 
 %% 
-\section{Code: logging}
+\section{Código: logging}
 
-A typical use of the log in a system call looks like this:
+Um uso típico do log em uma chamada de sistema se parece com isso:
 \begin{lstlisting}[]
   begin_op();
   ...
@@ -456,82 +401,72 @@ A typical use of the log in a system call looks like this:
 \end{lstlisting}
 
 \indexcode{begin_op}
-waits until
-the logging system is not currently committing, and until
-there is enough unreserved log space to hold
-the writes from this call.
+\lineref{kernel/log.c:/^begin.op/}
+espera até que o sistema de logging não esteja realizando um commit, e até que haja espaço não reservado suficiente no log para as gravações desta chamada. 
 \lstinline{log.outstanding}
-counts the number of system calls that have reserved log
-space; the total reserved space is 
+conta o número de chamadas de sistema que reservaram espaço no log; o espaço total reservado é 
 \lstinline{log.outstanding}
-times
+vezes
 \lstinline{MAXOPBLOCKS}.
-Incrementing
+Incrementar
 \lstinline{log.outstanding}
-both reserves space and prevents a commit
-from occurring during this system call.
-The code conservatively assumes that each system call might write up to
+reserva espaço e impede que um commit ocorra durante essa chamada de sistema.
+O código assume conservadoramente que cada chamada pode gravar até
 \lstinline{MAXOPBLOCKS}
-distinct blocks.
+blocos distintos.
 
 \indexcode{log_write}
-acts as a proxy for 
+\lineref{kernel/log.c:/^log.write/}
+atua como um substituto para 
 \indexcode{bwrite}.
-It records the block's sector number in memory,
-reserving it a slot in the log on disk,
-and pins the buffer in the block cache
-to prevent the block cache from evicting it.
-The block must stay in the cache until committed:
-until then, the cached copy is the only record
-of the modification; it cannot be written to
-its place on disk until after commit;
-and other reads in the same transaction must
-see the modifications.
+Ele registra o número do setor do bloco em memória,
+reservando um slot para ele no log do disco,
+e fixa o buffer no cache de blocos para evitar que ele seja descartado.
+O bloco deve permanecer no cache até o commit:
+até lá, a cópia em cache é o único registro da modificação; ela não pode ser gravada diretamente em seu local no disco até o commit;
+e outras leituras dentro da mesma transação devem ver as modificações.
 \lstinline{log_write}
-notices when a block is written multiple times during a single
-transaction, and allocates that block the same slot in the log.
-This optimization is often called
-\indextext{absorption}.
-It is common that, for example, the disk block containing inodes
-of several files is written several times within a transaction.  By absorbing
-several disk writes into one, the file system can save log space and
-can achieve better performance because only one copy of the disk block must be
-written to disk.
+detecta quando um bloco é gravado várias vezes durante uma única transação, e aloca para ele o mesmo slot no log.
+Essa otimização é comumente chamada de 
+\indextext{absorção}.
+É comum, por exemplo, que o bloco de disco contendo inodes de vários arquivos seja gravado diversas vezes dentro de uma transação. Absorvendo várias gravações em disco em uma só, o sistema de 
+arquivos economiza espaço no log e melhora o desempenho, pois apenas uma cópia do bloco precisa ser gravada.
 
 \indexcode{end_op}
-first decrements the count of outstanding system calls.
-If the count is now zero, it commits the current
-transaction by calling
+\lineref{kernel/log.c:/^end.op/}
+primeiro decrementa a contagem de chamadas de sistema pendentes.
+Se essa contagem chega a zero, ele realiza o commit da transação atual chamando
 \lstinline{commit().}
-There are four stages in this process.
+Esse processo ocorre em quatro etapas.
 \lstinline{write_log()}
-copies each block modified in the transaction from the buffer
-cache to its slot in the log on disk.
+\lineref{kernel/log.c:/^write.log/}
+copia cada bloco modificado da transação do cache para seu slot no log no disco.
 \lstinline{write_head()}
-writes the header block to disk: this is the
-commit point, and a crash after the write will
-result in recovery replaying the transaction's writes from the log.
+\lineref{kernel/log.c:/^write.head/}
+grava o bloco de cabeçalho no disco: esse é o ponto de commit, e uma falha após essa gravação fará com que a recuperação repita as gravações da transação a partir do log.
 \indexcode{install_trans}
-reads each block from the log and writes it to the proper
-place in the file system.
-Finally
+\lineref{kernel/log.c:/^install_trans/}
+lê cada bloco do log e o grava em seu local apropriado no sistema de arquivos.
+Finalmente, 
 \lstinline{end_op}
-writes the log header with a count of zero;
-this has to happen before the next transaction starts writing
-logged blocks, so that a crash doesn't result in recovery
-using one transaction's header with the subsequent transaction's
-logged blocks.
+grava o cabeçalho do log com contagem zero;
+isso deve ocorrer antes da próxima transação começar a gravar blocos logados, para evitar que uma falha cause a recuperação usando o cabeçalho de uma transação com os blocos de outra.
 
 \indexcode{recover_from_log}
-is called from 
+\lineref{kernel/log.c:/^recover_from_log/}
+é chamada de 
 \indexcode{initlog}
-It reads the log header, and mimics the actions of
+\lineref{kernel/log.c:/^initlog/},
+que por sua vez é chamada por \indexcode{fsinit}\lineref{kernel/fs.c:/^fsinit/} durante o boot, antes que o primeiro processo de usuário seja executado
+\lineref{kernel/proc.c:/fsinit/}.
+Ela lê o cabeçalho do log, e imita as ações de
 \lstinline{end_op}
-if the header indicates that the log contains a committed transaction.
+caso o cabeçalho indique que o log contém uma transação confirmada.
 
-An example use of the log occurs in 
+Um exemplo de uso do log ocorre em 
 \indexcode{filewrite}
-The transaction looks like this:
+\lineref{kernel/file.c:/^filewrite/}.
+A transação se parece com:
 \begin{lstlisting}[]
       begin_op();
       ilock(f->ip);
@@ -539,1188 +474,1219 @@ The transaction looks like this:
       iunlock(f->ip);
       end_op();
 \end{lstlisting}
-This code is wrapped in a loop that breaks up large writes into individual
-transactions of just a few sectors at a time, to avoid overflowing
-the log.  The call to
+Esse código está envolto em um loop que divide grandes gravações em transações individuais de apenas alguns setores por vez, para evitar exceder o log. A chamada para
 \indexcode{writei}
-writes many blocks as part of this
-transaction: the file's inode, one or more bitmap blocks, and some data
-blocks.
+grava vários blocos como parte dessa transação: o inode do arquivo, um ou mais blocos de mapa de bits e alguns blocos de dados.
 %% 
 %% 
 %% 
-\section{Code: Block allocator}
+\section{Código: Alocador de blocos}
 
-File and directory content is stored in disk blocks,
-which must be allocated from a free pool.
-Xv6's block allocator
-maintains a free bitmap on disk, with one bit per block. 
-A zero bit indicates that the corresponding block is free;
-a one bit indicates that it is in use.
-The program
+O conteúdo de arquivos e diretórios é armazenado em blocos de disco,
+que devem ser alocados a partir de um conjunto livre.
+O alocador de blocos do xv6
+mantém um bitmap de blocos livres no disco, com um bit por bloco.
+Um bit zero indica que o bloco correspondente está livre;
+um bit um indica que está em uso.
+O programa
 \lstinline{mkfs}
-sets the bits corresponding to the boot sector, superblock, log blocks, inode
-blocks, and bitmap blocks.
+define os bits correspondentes ao setor de boot, superbloco, blocos de log, blocos de inode
+e blocos do bitmap.
 
-The block allocator provides two functions:
+O alocador de blocos fornece duas funções:
 \indexcode{balloc}
-allocates a new disk block, and
+aloca um novo bloco de disco, e
 \indexcode{bfree}
-frees a block.
+libera um bloco.
+O laço em
 \lstinline{balloc}
-The loop in
-\lstinline{balloc}
-at
-considers every block, starting at block 0 up to 
+na linha
+\lineref{kernel/fs.c:/^..for.b.=.0/}
+considera todos os blocos, começando no bloco 0 até
 \lstinline{sb.size},
-the number of blocks in the file system.
-It looks for a block whose bitmap bit is zero,
-indicating that it is free.
-If
+o número total de blocos no sistema de arquivos.
+Ele procura por um bloco cujo bit no bitmap seja zero,
+indicando que está livre.
+Se
 \lstinline{balloc}
-finds such a block, it updates the bitmap 
-and returns the block.
-For efficiency, the loop is split into two 
-pieces.
-The outer loop reads each block of bitmap bits.
-The inner loop checks all 
-Bits-Per-Block (\lstinline{BPB})
-bits in a single bitmap block.
-The race that might occur if two processes try to allocate
-a block at the same time is prevented by the fact that
-the buffer cache only lets one process use any one bitmap block at a time.
+encontra tal bloco, ele atualiza o bitmap
+e retorna o bloco.
+Por eficiência, o laço é dividido em duas partes.
+O laço externo lê cada bloco de bits do bitmap.
+O laço interno verifica todos os
+Bits por Bloco (\lstinline{BPB})
+em um único bloco de bitmap.
+A condição de corrida que poderia ocorrer se dois processos tentassem alocar
+um bloco ao mesmo tempo é evitada pelo fato de que
+o cache de blocos permite apenas que um processo utilize um bloco de bitmap por vez.
 
 \lstinline{bfree}
-finds the right bitmap block and clears the right bit.
-Again the exclusive use implied by
+\lineref{kernel/fs.c:/^bfree/}
+encontra o bloco de bitmap correto e limpa o bit correspondente.
+Novamente, o uso exclusivo implícito por
 \lstinline{bread}
-and
+e
 \lstinline{brelse}
-avoids the need for explicit locking.
+evita a necessidade de bloqueios explícitos.
 
-As with much of the code described in the remainder of this chapter, 
+Como ocorre com boa parte do código descrito no restante deste capítulo,
 \lstinline{balloc}
-and
+e
 \lstinline{bfree}
-must be called inside a transaction.
+devem ser chamados dentro de uma transação.
 %% 
 %%  -------------------------------------------
 %% 
-\section{Inode layer}
+\section{Camada de inodes}
 
-The term 
-\indextext{inode} 
-can have one of two related meanings.
-It might refer to the on-disk data structure containing
-a file's size and list of data block numbers.
-Or ``inode'' might refer to an in-memory inode, which contains
-a copy of the on-disk inode as well as extra information needed
-within the kernel.
+O termo
+\indextext{inode}
+pode ter dois significados relacionados.
+Pode se referir à estrutura de dados em disco que contém
+o tamanho de um arquivo e a lista de números de blocos de dados.
+Ou “inode” pode se referir a um inode em memória, que contém
+uma cópia do inode em disco, bem como informações extras necessárias
+dentro do kernel.
 
-The on-disk inodes
-are packed into a contiguous area
-of disk called the inode blocks.
-Every inode is the same size, so it is easy, given a
-number n, to find the nth inode on the disk.
-In fact, this number n, called the inode number or i-number,
-is how inodes are identified in the implementation.
+Os inodes em disco
+são agrupados em uma área contígua
+do disco chamada de blocos de inode.
+Todos os inodes têm o mesmo tamanho, então é fácil, dado um
+número n, encontrar o n-ésimo inode no disco.
+Na verdade, esse número n, chamado de número do inode ou i-number,
+é como os inodes são identificados na implementação.
 
-The on-disk inode is defined by a
+O inode em disco é definido por uma
 \indexcode{struct dinode}
-The 
+\lineref{kernel/fs.h:/^struct.dinode/}.
+O campo
 \lstinline{type}
-field distinguishes between files, directories, and special
-files (devices).
-A type of zero indicates that an on-disk inode is free.
-The
+distingue entre arquivos, diretórios e arquivos especiais (dispositivos).
+Um tipo zero indica que o inode em disco está livre.
+O campo
 \lstinline{nlink}
-field counts the number of directory entries that
-refer to this inode, in order to recognize when the
-on-disk inode and its data blocks should be freed.
-The
+conta o número de entradas de diretório que
+referenciam esse inode, a fim de reconhecer quando o
+inode em disco e seus blocos de dados devem ser liberados.
+O campo
 \lstinline{size}
-field records the number of bytes of content in the file.
-The
+registra o número de bytes de conteúdo no arquivo.
+O array
 \lstinline{addrs}
-array records the block numbers of the disk blocks holding
-the file's content.
+armazena os números dos blocos de disco que contêm
+o conteúdo do arquivo.
 
-The kernel keeps the set of active inodes in memory
-in a table called \indexcode{itable};
+O kernel mantém o conjunto de inodes ativos em memória
+em uma tabela chamada \indexcode{itable};
 \indexcode{struct inode}
-is the in-memory copy of a 
+\lineref{kernel/file.h:/^struct.inode/}
+é a cópia em memória de um
 \lstinline{struct}
 \lstinline{dinode}
-on disk.
-The kernel stores an inode in memory only if there are
-C pointers referring to that inode. The
+em disco.
+O kernel armazena um inode em memória apenas se houver
+ponteiros C referenciando esse inode. O campo
 \lstinline{ref}
-field counts the number of C pointers referring to the
-in-memory inode, and the kernel discards the inode from
-memory if the reference count drops to zero.
-The
+conta o número de ponteiros C que referenciam o
+inode em memória, e o kernel descarta o inode da
+memória se essa contagem de referências cair para zero.
+As funções
 \indexcode{iget}
-and
+e
 \indexcode{iput}
-functions acquire and release pointers to an inode,
-modifying the reference count.
-Pointers to an inode can come from file descriptors,
-current working directories, and transient kernel code
-such as
+adquirem e liberam ponteiros para um inode,
+modificando a contagem de referências.
+Ponteiros para um inode podem vir de descritores de arquivo,
+diretórios de trabalho atuais e código transitório do kernel,
+como o
 \lstinline{exec}.
 
-There are four lock or lock-like mechanisms in xv6's
-inode code.
+Existem quatro mecanismos de bloqueio ou similares no código
+de inode do xv6.
 \lstinline{itable.lock}
-protects the invariant that an inode is present in the inode table
-at most once, and the invariant that an in-memory inode's
+protege o invariante de que um inode está presente na tabela de inodes
+no máximo uma vez, e o invariante de que o campo
 \lstinline{ref}
-field counts the number of in-memory pointers to the inode.
-Each in-memory inode has a
+de um inode em memória conta o número de ponteiros em memória para o inode.
+Cada inode em memória possui um campo
 \lstinline{lock}
-field containing a
-sleep-lock, which ensures exclusive access to the
-inode's fields (such as file length) as well as to the
-inode's file or directory content blocks.
-An inode's
-\lstinline{ref},
-if it is greater than zero, causes the system to maintain
-the inode in the table, and not re-use the table entry for
-a different inode.
-Finally, each inode contains a
+contendo um
+sleep-lock, que garante acesso exclusivo aos campos do inode (como o tamanho do arquivo),
+bem como aos blocos de conteúdo do arquivo ou diretório.
+Um inode com
+\lstinline{ref}
+maior que zero é mantido na tabela,
+e sua entrada na tabela não será reutilizada para outro inode.
+Por fim, cada inode contém um campo
 \lstinline{nlink}
-field (on disk and copied in memory if in memory) that
-counts the number of directory entries that refer to a file;
-xv6 won't free an inode if its link count is greater than zero.
+(tanto em disco quanto em memória, se carregado) que
+conta o número de entradas de diretório que referenciam o arquivo;
+o xv6 não libera um inode se sua contagem de links for maior que zero.
+
+Um ponteiro para
+\lstinline{struct}
+\lstinline{inode}
+retornado por
+\lstinline{iget()}
+é garantido como válido até a chamada correspondente de
+\lstinline{iput()};
+o inode não será deletado, e a memória referenciada
+pelo ponteiro não será reutilizada para outro inode.
+\lstinline{iget()}
+fornece acesso não exclusivo a um inode, de modo que
+vários ponteiros podem referenciar o mesmo inode.
+Muitas partes do código do sistema de arquivos dependem desse comportamento de
+\lstinline{iget()},
+tanto para manter referências de longo prazo a inodes (como arquivos abertos
+e diretórios atuais), quanto para evitar condições de corrida
+sem causar deadlock em código que manipula múltiplos inodes (como
+a resolução de nomes de caminho).
 
 A
 \lstinline{struct}
 \lstinline{inode}
-pointer returned by
-\lstinline{iget()}
-is guaranteed to be valid until the corresponding call to
-\lstinline{iput()};
-the inode won't be deleted, and the memory referred to
-by the pointer won't be re-used for a different inode.
-\lstinline{iget()}
-provides non-exclusive access to an inode, so that
-there can be many pointers to the same inode.
-Many parts of the file-system code depend on this behavior of
-\lstinline{iget()},
-both to hold long-term references to inodes (as open files
-and current directories) and to prevent races while avoiding
-deadlock in code that manipulates multiple inodes (such as
-pathname lookup).
-
-The
-\lstinline{struct}
-\lstinline{inode}
-that 
+retornada por
 \lstinline{iget}
-returns may not have any useful content.
-In order to ensure it holds a copy of the on-disk
-inode, code must call
+pode não conter informações úteis ainda.
+Para garantir que ela contenha uma cópia do inode em disco,
+o código deve chamar
 \indexcode{ilock}.
-This locks the inode (so that no other process can
-\lstinline{ilock}
-it) and reads the inode from the disk,
-if it has not already been read.
+Isso bloqueia o inode (impedindo que outro processo o
+bloqueie com \lstinline{ilock}) e o lê do disco,
+caso ainda não tenha sido lido.
 \lstinline{iunlock}
-releases the lock on the inode.
-Separating acquisition of inode pointers from locking
-helps avoid deadlock in some situations, for example during
-directory lookup.
-Multiple processes can hold a C pointer to an inode
-returned by 
+libera o bloqueio do inode.
+Separar a aquisição do ponteiro para o inode do bloqueio
+ajuda a evitar deadlocks em certas situações, por exemplo durante
+a busca em diretórios.
+Vários processos podem manter um ponteiro C para um inode
+retornado por
 \lstinline{iget},
-but only one process can lock the inode at a time.
+mas apenas um processo pode bloquear o inode por vez.
 
-The inode table only stores inodes to which kernel code
-or data structures hold C pointers.
-Its main job is synchronizing access by multiple processes.
-The inode table also happens to cache frequently-used inodes, but
-caching is secondary; if an inode is used frequently, the buffer cache will probably
-keep it in memory.
-Code that modifies an in-memory inode writes it to disk with
+A tabela de inodes armazena apenas inodes para os quais o código do kernel
+ou estruturas de dados mantêm ponteiros C.
+Seu principal papel é sincronizar o acesso por múltiplos processos.
+A tabela de inodes também funciona como cache para inodes frequentemente utilizados, mas
+o cache é secundário; se um inode for usado com frequência, o cache de blocos provavelmente
+o manterá em memória.
+Código que modifica um inode em memória o escreve no disco com
 \lstinline{iupdate}.
 
 %% 
 %%  -------------------------------------------
 %% 
-\section{Code: Inodes}
+\section{Código: Inodes}
 
-To allocate a new inode (for example, when creating a file),
-xv6 calls
+Para alocar um novo inode (por exemplo, ao criar um arquivo),
+o xv6 chama
 \indexcode{ialloc}
+\lineref{kernel/fs.c:/^ialloc/}.
 \lstinline{ialloc}
-is similar to
+é similar a
 \indexcode{balloc}:
-it loops over the inode structures on the disk, one block at a time,
-looking for one that is marked free.
-When it finds one, it claims it by writing the new 
+ele percorre as estruturas de inode no disco, um bloco por vez,
+procurando por uma que esteja marcada como livre.
+Quando encontra uma, ele a reivindica escrevendo o novo 
 \lstinline{type}
-to the disk and then returns an entry from the inode table
-with the tail call to 
+no disco e então retorna uma entrada da tabela de inodes
+com a chamada de cauda para
 \indexcode{iget}
-The correct operation of
+\lineref{kernel/fs.c:/return.iget\(dev..inum\)/}.
+O funcionamento correto de
 \lstinline{ialloc}
-depends on the fact that only one process at a time
-can be holding a reference to 
+depende do fato de que apenas um processo por vez
+pode manter uma referência a
 \lstinline{bp}:
 \lstinline{ialloc}
-can be sure that some other process does not
-simultaneously see that the inode is available
-and try to claim it.
+pode ter certeza de que nenhum outro processo verá simultaneamente
+que o inode está disponível e tentará reivindicá-lo.
 
 \lstinline{iget}
-looks through the inode table for an active entry (\lstinline{ip->ref}
+\lineref{kernel/fs.c:/^iget/}
+procura na tabela de inodes por uma entrada ativa (\lstinline{ip->ref}
 \lstinline{>}
 \lstinline{0})
-with the desired device and inode number.
-If it finds one, it returns a new reference to that inode
-As
+com o dispositivo e número de inode desejados.
+Se encontrar, retorna uma nova referência para esse inode
+\linerefs{kernel/fs.c:/^....if.ip->ref.>.0/,/^....}/}.
+Enquanto
 \indexcode{iget}
-scans, it records the position of the first empty slot
-which it uses if it needs to allocate a table entry.
+varre a tabela, ele registra a posição do primeiro slot vazio
+\linerefs{kernel/fs.c:/^....if.empty.==.0/,/empty.=.ip/},
+que usará caso precise alocar uma nova entrada na tabela.
 
-Code must lock the inode using
+O código deve travar o inode usando
 \indexcode{ilock}
-before reading or writing its metadata or content.
+antes de ler ou escrever seus metadados ou conteúdo.
 \lstinline{ilock}
-uses a sleep-lock for this purpose.
-Once
+\lineref{kernel/fs.c:/^ilock/}
+usa um sleep-lock para esse propósito.
+Uma vez que
 \indexcode{ilock}
-has exclusive access to the inode, it reads the inode
-from disk (more likely, the buffer cache) if needed.
-The function
+tenha acesso exclusivo ao inode, ele o lê do disco (mais provavelmente do cache de buffer), se necessário.
+A função
 \indexcode{iunlock}
-releases the sleep-lock,
-which may cause any processes sleeping
-to be woken up.
+\lineref{kernel/fs.c:/^iunlock/}
+libera o sleep-lock,
+o que pode acordar processos que estavam esperando.
 
 \lstinline{iput}
-releases a C pointer to an inode
-by decrementing the reference count
-If this is the last reference, the inode's
-slot in the inode table is now free and can be re-used
-for a different inode.
+\lineref{kernel/fs.c:/^iput/}
+libera um ponteiro C para um inode
+decrementando o contador de referências
+\lineref{kernel/fs.c:/^..ip->ref--/}.
+Se esta for a última referência, o slot do inode na tabela de inodes
+está agora livre e pode ser reutilizado para um inode diferente.
 
-If 
+Se
 \indexcode{iput}
-sees that there are no C pointer references to an inode
-and that the inode has no links to it (occurs in no
-directory), then the inode and its data blocks must
-be freed.
+perceber que não há mais referências C para um inode
+e que o inode não tem mais links (ou seja, não está presente
+em nenhum diretório), então o inode e seus blocos de dados devem
+ser liberados.
 \lstinline{iput}
-calls
+chama
 \indexcode{itrunc}
-to truncate the file to zero bytes, freeing the data blocks;
-sets the inode type to 0 (unallocated);
-and writes the inode to disk
+para truncar o arquivo a zero bytes, liberando os blocos de dados;
+define o tipo do inode como 0 (não alocado);
+e escreve o inode no disco
+\lineref{kernel/fs.c:/inode.has.no.links.and/}.
 
-The locking protocol in 
+O protocolo de travamento em
 \indexcode{iput}
-in the case in which it frees the inode deserves a closer look.
-One danger is that a concurrent thread might be waiting in
+no caso em que ele libera o inode merece atenção especial.
+Um perigo é que uma thread concorrente esteja esperando em
 \lstinline{ilock}
-to use this inode (e.g., to read a file or list a directory),
-and won't be prepared to find that the inode is no longer
-allocated. This can't happen because there is no way for
-a system call to get a pointer to an in-memory inode if it has
-no links to it and 
+para usar esse inode (por exemplo, para ler um arquivo ou listar um diretório),
+e não esteja preparada para encontrar o inode não mais alocado.
+Isso não pode acontecer porque não há como uma chamada de sistema
+obter um ponteiro para um inode em memória se ele não tem links
+e
 \lstinline{ip->ref}
-is one. That one reference is the reference owned by the
-thread calling
+é um.
+Essa única referência pertence à thread que está chamando
 \lstinline{iput}.
-The other main danger is that a concurrent call to
+O outro grande perigo é que uma chamada concorrente para
 \lstinline{ialloc}
-might choose the same inode that
+escolha o mesmo inode que
 \lstinline{iput}
-is freeing.
-This can happen only after the
+está liberando.
+Isso só pode acontecer depois que
 \lstinline{iupdate}
-writes the disk so that the inode has type zero.
-This race is benign; the allocating thread will politely wait
-to acquire the inode's sleep-lock before reading or writing
-the inode, at which point
+escreve no disco que o inode tem tipo zero.
+Essa condição de corrida é benigna; a thread alocadora esperará
+educadamente para adquirir o sleep-lock do inode antes de ler ou escrever,
+momento no qual
 \lstinline{iput}
-is done with it.
+já terminou com ele.
 
 \lstinline{iput()}
-can write to the disk.  This means that any system call that uses the file
-system may write to the disk, because the system call may be the last one having
-a reference to the file. Even calls like
+pode escrever no disco. Isso significa que qualquer chamada de sistema que use o sistema de arquivos pode escrever no disco, pois pode ser a última a ter
+uma referência ao arquivo. Mesmo chamadas como
 \lstinline{read()}
-that appear to be read-only, may end up calling
+que parecem apenas leitura, podem acabar chamando
 \lstinline{iput().}
-This, in turn, means that even read-only system calls
-must be wrapped in transactions if they use the file system.
+Isso, por sua vez, significa que até mesmo chamadas de sistema de leitura
+devem ser encapsuladas em transações se utilizarem o sistema de arquivos.
 
-There is a challenging interaction between
+Existe uma interação desafiadora entre
 \lstinline{iput()}
-and crashes.
+e falhas.
 \lstinline{iput()}
-doesn't truncate a file immediately when the link count for the file
-drops to zero, because some process might still hold a reference to the inode in
-memory: a process might still be reading and writing to the file, because it
-successfully opened it. But, if a crash happens before the last process closes
-the file descriptor for the file, then the file will be marked allocated on disk
-but no directory entry will point to it.
+não trunca um arquivo imediatamente quando o número de links do arquivo
+cai para zero, porque algum processo ainda pode manter uma referência ao inode
+na memória: um processo ainda pode estar lendo ou escrevendo no arquivo, pois o abriu com sucesso.
+Mas, se ocorrer uma falha antes que o último processo feche
+o descritor de arquivo, o arquivo estará marcado como alocado no disco
+mas nenhum diretório apontará para ele.
 
-File systems handle this case in one of two ways. The simple solution is that on
-recovery, after reboot, the file system scans the whole file system for files
-that are marked allocated, but have no directory entry pointing to them.  If any
-such file exists, then it can free those files.
+Sistemas de arquivos lidam com esse caso de duas formas. A solução simples é que,
+após a recuperação (reboot), o sistema de arquivos escaneie todo o disco
+procurando arquivos que estejam marcados como alocados, mas que não tenham nenhuma entrada de diretório apontando para eles.
+Se encontrar tais arquivos, pode liberá-los.
 
-The second solution doesn't require scanning the file system.  In this solution,
-the file system records on disk (e.g., in the super block) the inode inumber of
-a file whose link count drops to zero but whose reference count isn't zero.  If
-the file system removes the file when its reference count reaches 0, then it
-updates the on-disk list by removing that inode from the list. On recovery, the
-file system frees any file in the list.
+A segunda solução não requer escanear o sistema de arquivos.
+Neste caso, o sistema grava em disco (por exemplo, no superbloco) o número do inode
+cujo número de links caiu para zero, mas cujo contador de referências ainda é diferente de zero.
+Se o sistema de arquivos remover o arquivo quando o contador de referências chegar a 0,
+então atualiza a lista em disco removendo aquele inode da lista.
+Na recuperação, o sistema libera quaisquer arquivos que estiverem na lista.
 
-Xv6 implements neither solution, which means that inodes may be marked allocated
-on disk, even though they are not in use anymore.  This means that over time xv6
-runs the risk that it may run out of disk space.
+O xv6 não implementa nenhuma das duas soluções, o que significa que inodes podem permanecer marcados como alocados
+no disco mesmo que não estejam mais em uso.
+Com o tempo, o xv6 corre o risco de ficar sem espaço em disco.
+
 %% 
 %% 
 %% 
-\section{Code: Inode content}
+\section{Código: Conteúdo do Inode}
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/inode.pdf}
-\caption{The representation of a file on disk.}
+\caption{A representação de um arquivo no disco.}
 \label{fig:inode}
 \end{figure}
 
-The on-disk inode structure,
+A estrutura de inode no disco,
 \indexcode{struct dinode},
-contains a size and an array of block numbers (see 
-Figure~\ref{fig:inode}).
-The inode data is found in the blocks listed
-in the
-\lstinline{dinode} 's
+contém um tamanho e um vetor de números de bloco (veja
+Figura~\ref{fig:inode}).
+Os dados do inode são encontrados nos blocos listados
+no vetor
 \lstinline{addrs}
-array.
-The first
+do
+\lstinline{dinode}.
+Os primeiros
 \indexcode{NDIRECT}
-blocks of data are listed in the first
+blocos de dados estão listados nas primeiras
 \lstinline{NDIRECT}
-entries in the array; these blocks are called 
-\indextext{direct blocks}.
-The next 
+entradas do vetor; esses blocos são chamados de
+\indextext{blocos diretos}.
+Os próximos
 \indexcode{NINDIRECT}
-blocks of data are listed not in the inode
-but in a data block called the
-\indextext{indirect block}.
-The last entry in the
+blocos de dados não estão listados no inode,
+mas sim em um bloco de dados chamado
+\indextext{bloco indireto}.
+A última entrada do vetor
 \lstinline{addrs}
-array gives the address of the indirect block.
-Thus the first 12 kB (
+guarda o endereço do bloco indireto.
+Assim, os primeiros 12 kB (
 \lstinline{NDIRECT} 
 \lstinline{x}
 \indexcode{BSIZE})
-bytes of a file can be loaded from blocks listed in the inode,
-while the next
+de um arquivo podem ser carregados diretamente dos blocos listados no inode,
+enquanto os próximos
 \lstinline{256} kB (
 \lstinline{NINDIRECT}
 \lstinline{x}
 \lstinline{BSIZE})
-bytes can only be loaded after consulting the indirect block.
-This is a good on-disk representation but a 
-complex one for clients.
-The function
+só podem ser acessados consultando o bloco indireto.
+Essa é uma boa representação em disco, porém
+complexa para os clientes.
+A função
 \indexcode{bmap}
-manages the representation so that higher-level routines, such as
+gerencia essa representação para que rotinas de mais alto nível, como
 \indexcode{readi}
-and
+e
 \indexcode{writei},
-which we will see shortly, do not need to manage this complexity.
+que veremos em breve, não precisem lidar com essa complexidade.
 \lstinline{bmap}
-returns the disk block number of the
-\lstinline{bn}'th
-data block for the inode
+retorna o número do bloco no disco do
+\lstinline{bn}'ésimo
+bloco de dados para o inode
 \lstinline{ip}.
-If
+Se
 \lstinline{ip}
-does not have such a block yet,
+ainda não possui esse bloco,
 \lstinline{bmap}
-allocates one.
+o aloca.
 
-The function
+A função
 \indexcode{bmap}
-begins by picking off the easy case: the first 
+\lineref{kernel/fs.c:/^bmap/}
+começa tratando o caso simples: os primeiros
 \indexcode{NDIRECT}
-blocks are listed in the inode itself
-The next 
+blocos estão listados diretamente no inode
+\linerefs{kernel/fs.c:/^..if.bn.<.NDIRECT/,/^..}/}.
+Os próximos
 \indexcode{NINDIRECT}
-blocks are listed in the indirect block at
+blocos estão listados no bloco indireto em
 \lstinline{ip->addrs[NDIRECT]}.
 \lstinline{bmap}
-reads the indirect block
-and then reads a block number from the right 
-position within the block
-If the block number exceeds
+lê o bloco indireto
+\lineref{kernel/fs.c:/bp.=.bread.ip->dev..addr/}
+e então lê o número do bloco na posição correta dentro do bloco
+\lineref{kernel/fs.c:/a.=..uint\*.bp->data/}.
+Se o número de bloco exceder
 \lstinline{NDIRECT+NINDIRECT},
 \lstinline{bmap} 
-panics; 
+entra em pânico;
 \lstinline{writei}
-contains the check that prevents this from happening
+contém a verificação que evita que isso aconteça
+\lineref{kernel/fs.c:/off...n...MAXFILE.BSIZE/}.
 
 \lstinline{bmap}
-allocates blocks as needed.
-An
-\lstinline{ip->addrs[]}
-or indirect
-entry of zero indicates that no block is allocated.
-As
+aloca blocos conforme necessário.
+Uma entrada zero em
+\lstinline{ip->addrs[]} ou no bloco indireto
+indica que nenhum bloco foi alocado.
+À medida que
 \lstinline{bmap}
-encounters zeros, it replaces them with the numbers of fresh blocks,
-allocated on demand
+encontra zeros, os substitui por números de blocos novos,
+alocados sob demanda
+\linerefs{kernel/fs.c:/^....if..addr.=.*==.0/,/./}
+\linerefs{kernel/fs.c:/^....if..addr.*NDIRECT.*==.0/,/./}.
 
 \indexcode{itrunc}
-frees a file's blocks, resetting the inode's size to zero.
+libera os blocos de um arquivo, redefinindo seu tamanho para zero.
 \lstinline{itrunc}
-starts by freeing the direct blocks
-then the ones listed in the indirect block
-and finally the indirect block itself
+\lineref{kernel/fs.c:/^itrunc/}
+começa liberando os blocos diretos
+\linerefs{kernel/fs.c:/^..for.i.=.0.*NDIRECT/,/^..}/},
+depois os listados no bloco indireto
+\linerefs{kernel/fs.c:/^....for.j.=.0.*NINDIRECT/,/^....}/},
+e por fim o próprio bloco indireto
+\linerefs{kernel/fs.c:/^....bfree.*NDIRECT/,/./}.
 
 \lstinline{bmap}
-makes it easy for
+facilita o acesso aos dados de um inode para
 \indexcode{readi}
-and
-\indexcode{writei} 
-to get at an inode's data.
+e
+\indexcode{writei}.
 \lstinline{readi}
-starts by
-making sure that the offset and count are not 
-beyond the end of the file.
-Reads that start beyond the end of the file return an error
-while reads that start at or cross the end of the file 
-return fewer bytes than requested
-The main loop processes each block of the file,
-copying data from the buffer into 
+\lineref{kernel/fs.c:/^readi/}
+começa
+garantindo que o deslocamento e o número de bytes não estejam
+além do fim do arquivo.
+Leituras que começam além do final retornam erro
+\linerefs{kernel/fs.c:/^..if.off.>.ip->size/,/./}
+enquanto leituras que começam ou cruzam o final do arquivo
+retornam menos bytes do que o solicitado
+\linerefs{kernel/fs.c:/^..if.off.\+.n.>.ip->size/,/./}.
+O laço principal processa cada bloco do arquivo,
+copiando dados do buffer para
 \lstinline{dst}
-%%  NOTE: It is very hard to write line references
-%%  for writei because so many of the lines are identical
-%%  to those in readi.  Luckily, identical lines probably
-%%  don't need to be commented upon.
+\linerefs{kernel/fs.c:/^..for.tot=0/,/^..}/}.
+
 \indexcode{writei}
-is identical to
+\lineref{kernel/fs.c:/^writei/}
+é idêntica à
 \indexcode{readi},
-with three exceptions:
-writes that start at or cross the end of the file
-grow the file, up to the maximum file size
-the loop copies data into the buffers instead of out
-and if the write has extended the file,
+com três exceções:
+escritas que começam ou cruzam o fim do arquivo
+fazem o arquivo crescer, até o tamanho máximo permitido
+\linerefs{kernel/fs.c:/^..if.off.\+.n.>.MAXFILE/,/./};
+o laço copia dados para os buffers em vez de lê-los
+\lineref{kernel/fs.c:/either.copyin.*bp->data/};
+e se a escrita expandiu o arquivo,
 \indexcode{writei}
-must update its size
+deve atualizar seu tamanho
+\linerefs{kernel/fs.c:/^..if.off.>.ip->size\)/,/./}.
 
-%% Both
-%% \indexcode{readi}
-%% and
-%% \indexcode{writei}
-%% begin by checking for
-%% \lstinline{ip->type}
-%% \lstinline{==}
-%% \indexcode{T_DEV}.
-%% This case handles special devices whose data does not
-%% live in the file system; we will return to this case in the file descriptor layer.
-
-The function
+A função
 \indexcode{stati}
-copies inode metadata into the 
-\lstinline{stat}
-structure, which is exposed to user programs
-via the
-\indexcode{stat}
-system call.
+\lineref{kernel/fs.c:/^stati\(/}
+copia os metadados do inode para a estrutura
+\lstinline{stat},
+que é exposta aos programas de usuário
+por meio da chamada de sistema
+\indexcode{stat}.
 %% 
 %% 
 %% 
-\section{Code: directory layer}
+\section{Código: camada de diretório}
 
-A directory is implemented internally much like a file.
-Its inode has type
+Um diretório é implementado internamente de forma muito semelhante a um arquivo.
+Seu inode tem tipo
 \indexcode{T_DIR}
-and its data is a sequence of directory entries.
-Each entry is a
+e seus dados são uma sequência de entradas de diretório.
+Cada entrada é uma
 \indexcode{struct dirent}
-which contains a name and an inode number.
-The name is at most
+\lineref{kernel/fs.h:/^struct.dirent/},
+que contém um nome e um número de inode.
+O nome tem no máximo
 \indexcode{DIRSIZ}
-(14) characters;
-if shorter, it is terminated by a NULL (0) byte.
-Directory entries with inode number zero are free.
+(14) caracteres;
+se for menor, é terminado por um byte NULL (0).
+Entradas de diretório com número de inode igual a zero estão livres.
 
-The function
+A função
 \indexcode{dirlookup}
-searches a directory for an entry with the given name.
-If it finds one, it returns a pointer to the corresponding inode, unlocked,
-and sets 
+\lineref{kernel/fs.c:/^dirlookup/}
+procura uma entrada com o nome dado dentro de um diretório.
+Se encontrar, retorna um ponteiro para o inode correspondente, destravado,
+e define 
 \lstinline{*poff}
-to the byte offset of the entry within the directory,
-in case the caller wishes to edit it.
-If
+como o deslocamento em bytes da entrada dentro do diretório,
+caso o chamador deseje editá-la.
+Se
 \lstinline{dirlookup}
-finds an entry with the right name,
-it updates
+encontra uma entrada com o nome correto,
+ela atualiza
 \lstinline{*poff}
-and returns an unlocked inode
-obtained via
+e retorna um inode destravado
+obtido via
 \indexcode{iget}.
 \lstinline{dirlookup}
-is the reason that 
+é o motivo pelo qual 
 \lstinline{iget}
-returns unlocked inodes.
-The caller has locked
+retorna inodes destravados.
+O chamador trancou
 \lstinline{dp},
-so if the lookup was for
+então se a busca foi por
 \indexcode{.},
-an alias for the current directory,
-attempting to lock the inode before
-returning would try to re-lock
+um alias para o diretório atual,
+tentar trancar o inode antes de retorná-lo tentaria re-trancar
 \lstinline{dp}
-and deadlock.
-(There are more complicated deadlock scenarios involving
-multiple processes and
+e causaria um deadlock.
+(Há cenários de deadlock mais complicados envolvendo
+múltiplos processos e
 \indexcode{..},
-an alias for the parent directory;
+um alias para o diretório pai;
 \lstinline{.}
-is not the only problem.)
-The caller can unlock
+não é o único problema.)
+O chamador pode destrancar
 \lstinline{dp}
-and then lock
+e então trancar
 \lstinline{ip},
-ensuring that it only holds one lock at a time.
+garantindo que mantenha apenas um lock por vez.
 
-The function
+A função
 \indexcode{dirlink}
-writes a new directory entry with the given name and inode number into the
-directory
+\lineref{kernel/fs.c:/^dirlink/}
+escreve uma nova entrada de diretório com o nome e número de inode fornecidos no
+diretório
 \lstinline{dp}.
-If the name already exists,
+Se o nome já existir,
 \lstinline{dirlink}
-returns an error
-The main loop reads directory entries looking for an unallocated entry.
-When it finds one, it stops the loop early
-with 
+retorna um erro
+\linerefs{kernel/fs.c:/Check.that.name.is.not.present/,/^..}/}.
+O laço principal lê as entradas do diretório procurando uma entrada não alocada.
+Quando encontra, interrompe o laço mais cedo
+\linerefs{kernel/fs.c:/Look for an empty dirent/,/.*break/},
+com 
 \lstinline{off}
-set to the offset of the available entry.
-Otherwise, the loop ends with
+ajustado para o deslocamento da entrada disponível.
+Caso contrário, o laço termina com
 \lstinline{off}
-set to
+ajustado para
 \lstinline{dp->size}.
-Either way, 
+De qualquer forma, 
 \lstinline{dirlink}
-then adds a new entry to the directory
-by writing at offset
+então adiciona uma nova entrada ao diretório
+escrevendo no deslocamento
 \lstinline{off}
+\linerefs{kernel/fs.c:/if.writei/,/return -1/}.
 %% 
 %% 
 %% 
-\section{Code: Path names}
+\section{Código: Nomes de caminho}
 
-Path name lookup involves a succession of calls to
+A busca por nome de caminho envolve uma sucessão de chamadas a
 \indexcode{dirlookup},
-one for each path component.
+uma para cada componente do caminho.
 \lstinline{namei}
-evaluates 
+\lineref{kernel/fs.c:/^namei/}
+avalia 
 \lstinline{path}
-and returns the corresponding 
-\lstinline{inode}.
-The function
+e retorna o 
+\lstinline{inode}
+correspondente.
+A função
 \indexcode{nameiparent}
-is a variant: it stops before the last element, returning the 
-inode of the parent directory and copying the final element into
+é uma variante: ela para antes do último elemento, retornando o 
+inode do diretório pai e copiando o último elemento em
 \lstinline{name}.
-Both call the generalized function
+Ambas chamam a função generalizada
 \indexcode{namex}
-to do the real work.
+para realizar o trabalho real.
 
 \lstinline{namex}
-starts by deciding where the path evaluation begins.
-If the path begins with a slash, evaluation begins at the root;
-otherwise, the current directory
-Then it uses
+\lineref{kernel/fs.c:/^namex/}
+começa decidindo onde a avaliação do caminho se inicia.
+Se o caminho começar com uma barra, a avaliação começa na raiz;
+caso contrário, no diretório atual
+\linerefs{kernel/fs.c:/..if.\*path.==....\)/,/idup/}.
+Em seguida, usa
 \indexcode{skipelem}
-to consider each element of the path in turn
-Each iteration of the loop must look up 
+para considerar cada elemento do caminho por vez
+\lineref{kernel/fs.c:/while.*skipelem/}.
+Cada iteração do laço deve procurar 
 \lstinline{name}
-in the current inode
+no inode atual
 \lstinline{ip}.
-The iteration begins by locking
+A iteração começa trancando
 \lstinline{ip}
-and checking that it is a directory.
-If not, the lookup fails
-(Locking
+e verificando se ele é um diretório.
+Caso contrário, a busca falha
+\linerefs{kernel/fs.c:/^....ilock.ip/,/^....}/}.
+(Trancar
 \lstinline{ip}
-is necessary not because 
+é necessário não porque 
 \lstinline{ip->type}
-can change underfoot—it can't—but because
-until 
+possa mudar—não pode—mas porque
+até que 
 \indexcode{ilock}
-runs,
+rode,
 \lstinline{ip->type}
-is not guaranteed to have been loaded from disk.)
-If the call is 
+não é garantido de ter sido carregado do disco.)
+Se a chamada for 
 \indexcode{nameiparent}
-and this is the last path element, the loop stops early,
-as per the definition of
+e este for o último elemento do caminho, o laço para mais cedo,
+como previsto na definição de
 \lstinline{nameiparent};
-the final path element has already been copied
-into
+o último elemento do caminho já foi copiado para
 \lstinline{name},
-so
+então
 \indexcode{namex}
-need only
-return the unlocked
+apenas precisa
+retornar o
 \lstinline{ip}
-Finally, the loop looks for the path element using
+destravado
+\linerefs{kernel/fs.c:/^....if.nameiparent/,/^....}/}.
+Por fim, o laço procura o elemento do caminho usando
 \indexcode{dirlookup}
-and prepares for the next iteration by setting
+e se prepara para a próxima iteração atribuindo
 \lstinline{ip = next}
-When the loop runs out of path elements, it returns
+\linerefs{kernel/fs.c:/^....if..next.*dirlookup/,/^....ip.=.next/}.
+Quando o laço fica sem elementos, ele retorna
 \lstinline{ip}.
 
-The procedure
+O procedimento
 \lstinline{namex}
-may take a long time to complete: it could involve several disk operations to
-read inodes and directory blocks for the directories traversed in the pathname
-(if they are not in the buffer cache).  Xv6 is carefully designed so that if an
-invocation of
+pode levar bastante tempo para concluir: ele pode envolver diversas operações de disco para
+ler inodes e blocos de diretório para os diretórios percorridos no caminho
+(se eles não estiverem no cache de buffer). O Xv6 foi cuidadosamente projetado para que, se uma
+invocação de
 \lstinline{namex}
-by one kernel thread is blocked on a disk I/O, another kernel thread looking up
-a different pathname can proceed concurrently.
+por uma thread do kernel estiver bloqueada esperando E/S de disco, outra thread do kernel procurando por
+um caminho diferente possa prosseguir paralelamente.
 \lstinline{namex}
-locks each directory in the path separately so that lookups in different
-directories can proceed in parallel.
+tranca cada diretório do caminho separadamente, permitindo que buscas em diretórios diferentes
+ocorram em paralelo.
 
-This concurrency introduces some challenges. For example, while one kernel
-thread is looking up a pathname another kernel thread may be changing the
-directory tree by unlinking a directory.  A potential risk is that a lookup
-may be searching a directory that has been deleted by another kernel thread and
-its blocks have been re-used for another directory or file.
+Essa concorrência introduz alguns desafios. Por exemplo, enquanto uma thread do kernel
+procura um caminho, outra pode estar modificando a árvore de diretórios removendo um diretório.
+Um risco potencial é que uma busca esteja acessando um diretório que foi excluído por outra thread e
+seus blocos tenham sido reutilizados por outro diretório ou arquivo.
 
-Xv6 avoids such races.  For example, when executing
+O Xv6 evita essas condições de corrida. Por exemplo, ao executar
 \lstinline{dirlookup}
-in
+dentro de
 \lstinline{namex},
-the lookup thread holds the lock on the directory and
+a thread de busca mantém o lock no diretório e
 \lstinline{dirlookup}
-returns an inode that was obtained using
+retorna um inode obtido usando
 \lstinline{iget}.
 \lstinline{iget}
-increases the reference count of the inode.  Only after receiving the
-inode from
+aumenta o contador de referências do inode. Só depois de receber o
+inode de
 \lstinline{dirlookup}
-does
+é que
 \lstinline{namex}
-release the lock on the directory.  Now another thread may unlink the inode from
-the directory but xv6 will not delete the inode yet, because the reference count
-of the inode is still larger than zero.
+libera o lock do diretório. A partir desse ponto outra thread pode remover o inode do
+diretório, mas o xv6 não o apagará ainda, porque o contador de referências
+do inode ainda é maior que zero.
 
-Another risk is deadlock.  For example,
+Outro risco é deadlock. Por exemplo,
 \lstinline{next}
-points to the same inode as
+aponta para o mesmo inode que
 \lstinline{ip}
-when looking up ".".
-Locking
+ao procurar por ".".
+Trancar
 \lstinline{next}
-before releasing the lock on
+antes de liberar o lock de
 \lstinline{ip}
-would result in a deadlock.
-To avoid this deadlock,
+causaria um deadlock.
+Para evitar isso,
 \lstinline{namex}
-unlocks the directory before obtaining a lock on
+destranca o diretório antes de obter o lock de
 \lstinline{next}.
-Here again we see why the separation between
+Aqui vemos novamente por que a separação entre
 \lstinline{iget}
-and
+e
 \lstinline{ilock}
-is important.
+é importante.
 %% 
 %% 
 %% 
-\section{File descriptor layer}
+\section{Camada de descritor de arquivo}
 
-A cool aspect of the Unix interface is that most resources in Unix are
-represented as files, including devices such as the console, pipes, and of
-course, real files.  The file descriptor layer is the layer that achieves this
-uniformity.
+Um aspecto interessante da interface Unix é que a maioria dos recursos do sistema
+são representados como arquivos, incluindo dispositivos como o console, pipes e,
+claro, arquivos reais. A camada de descritor de arquivos é responsável por
+essa uniformidade.
 
-Xv6 gives each process its own table of open files, or
-file descriptors, as we saw in
-Chapter~\ref{CH:UNIX}.
-Each open file is represented by a
+O Xv6 dá a cada processo sua própria tabela de arquivos abertos, ou
+descritores de arquivos, como vimos no
+Capítulo~\ref{CH:UNIX}.
+Cada arquivo aberto é representado por uma
 \indexcode{struct file}
-which is a wrapper around either an inode or a pipe,
-plus an I/O offset.
-Each call to 
+\lineref{kernel/file.h:/^struct.file/},
+que encapsula um inode ou um pipe,
+além de um deslocamento de E/S.
+Cada chamada a 
 \indexcode{open}
-creates a new open file (a new
+cria um novo arquivo aberto (uma nova
 \lstinline{struct}
 \lstinline{file}):
-if multiple processes open the same file independently,
-the different instances will have different I/O offsets.
-On the other hand, a single open file
-(the same
+se múltiplos processos abrirem o mesmo arquivo de forma independente,
+as instâncias terão deslocamentos de E/S diferentes.
+Por outro lado, um único arquivo aberto
+(a mesma
 \lstinline{struct}
 \lstinline{file})
-can appear
-multiple times in one process's file table
-and also in the file tables of multiple processes.
-This would happen if one process used
+pode aparecer
+várias vezes na tabela de arquivos de um processo
+e também nas tabelas de outros processos.
+Isso acontece se um processo usa
 \lstinline{open}
-to open the file and then created aliases using
+para abrir o arquivo e cria aliases usando
 \indexcode{dup}
-or shared it with a child using
+ou o compartilha com um filho via
 \indexcode{fork}.
-A reference count tracks the number of references to
-a particular open file.
-A file can be open for reading or writing or both.
-The
+Um contador de referências acompanha o número de referências a
+um determinado arquivo aberto.
+Um arquivo pode estar aberto para leitura, escrita ou ambos.
+Os campos
 \lstinline{readable}
-and
+e
 \lstinline{writable}
-fields track this.
+controlam isso.
 
-All the open files in the system are kept in a global file table,
-the 
+Todos os arquivos abertos no sistema são mantidos em uma tabela global de arquivos,
+a 
 \indexcode{ftable}.
-The file table
-has functions to allocate a file
+A tabela de arquivos
+possui funções para alocar um arquivo
 (\indexcode{filealloc}),
-create a duplicate reference
+criar uma referência duplicada
 (\indexcode{filedup}),
-release a reference
+liberar uma referência
 (\indexcode{fileclose}),
-and read and write data
+e ler e escrever dados
 (\indexcode{fileread}
-and 
+e 
 \indexcode{filewrite}).
 
-The first three follow the now-familiar form.
+As três primeiras seguem um formato já familiar.
 \lstinline{filealloc}
-scans the file table for an unreferenced file
+\lineref{kernel/file.c:/^filealloc/}
+percorre a tabela de arquivos procurando por um arquivo não referenciado
 (\lstinline{f->ref}
 \lstinline{==}
 \lstinline{0})
-and returns a new reference;
+e retorna uma nova referência;
 \indexcode{filedup}
-increments the reference count;
-and
+\lineref{kernel/file.c:/^filedup/}
+incrementa o contador de referências;
+e
 \indexcode{fileclose}
-decrements it.
-When a file's reference count reaches zero,
+\lineref{kernel/file.c:/^fileclose/}
+o decrementa.
+Quando o contador de referências chega a zero,
 \lstinline{fileclose}
-releases the underlying pipe or inode,
-according to the type.
+libera o pipe ou inode subjacente,
+conforme o tipo.
 
-The functions
+As funções
 \indexcode{filestat},
 \indexcode{fileread},
-and
+e
 \indexcode{filewrite}
-implement the 
+implementam as operações 
 \indexcode{stat},
 \indexcode{read},
-and
+e
 \indexcode{write}
-operations on files.
+em arquivos.
 \lstinline{filestat}
-is only allowed on inodes and calls
+\lineref{kernel/file.c:/^filestat/}
+só é permitida em inodes e chama
 \indexcode{stati}.
 \lstinline{fileread}
-and
+e
 \lstinline{filewrite}
-check that the operation is allowed by
-the open mode and then
-pass the call through to either
-the pipe or inode implementation.
-If the file represents an inode,
+verificam se a operação é permitida pelo
+modo de abertura e então
+encaminham a chamada para a implementação correspondente,
+seja pipe ou inode.
+Se o arquivo representar um inode,
 \lstinline{fileread}
-and
+e
 \lstinline{filewrite}
-use the I/O offset as the offset for the operation
-and then advance it
-Pipes have no concept of offset.
-Recall that the inode functions require the caller
-to handle locking
-The inode locking has the convenient side effect that the
-read and write offsets are updated atomically, so that
-multiple writing to the same file simultaneously
-cannot overwrite each other's data, though their writes may end up interlaced.
+usam o deslocamento de E/S como o deslocamento da operação
+e depois o atualizam
+\linerefs{kernel/file.c:/readi/,/./}
+\linerefs{kernel/file.c:/writei/,/./}.
+Pipes não têm conceito de deslocamento.
+Lembre que as funções de inode exigem que o chamador
+gerencie o locking
+\linerefs{kernel/file.c:/stati/-1,/iunlock/}
+\linerefs{kernel/file.c:/readi/-1,/iunlock/}
+\linerefs{kernel/file.c:/writei\(f/-1,/iunlock/}.
+O locking no inode tem o efeito colateral conveniente de que os
+deslocamentos de leitura e escrita são atualizados atomicamente, de forma que
+múltiplas escritas simultâneas no mesmo arquivo
+não sobrescrevem os dados umas das outras, embora suas escritas possam acabar entrelaçadas.
 %% 
 %% 
 %% 
-\section{Code: System calls}
+\section{Código: Chamadas de sistema}
 
-With the functions that the lower layers provide, the implementation of most
-system calls is trivial
-(see
+Com as funções fornecidas pelas camadas inferiores, a implementação da maioria
+das chamadas de sistema é trivial
+(veja
 \fileref{kernel/sysfile.c}).
-There are a few calls that
-deserve a closer look.
+Há algumas chamadas que
+merecem uma análise mais cuidadosa.
 
-The functions
+As funções
 \indexcode{sys_link}
-and
+e
 \indexcode{sys_unlink}
-edit directories, creating or removing references to inodes.
-They are another good example of the power of using 
-transactions. 
+editam diretórios, criando ou removendo referências para inodes.
+Elas são outro bom exemplo do poder do uso de 
+transações. 
 \lstinline{sys_link}
-begins by fetching its arguments, two strings
+\lineref{kernel/sysfile.c:/^sys_link/}
+começa obtendo seus argumentos, duas strings:
 \lstinline{old}
-and
+e
 \lstinline{new}
-Assuming 
+\lineref{kernel/sysfile.c:/argstr.*old.*new/}.
+Assumindo que
 \lstinline{old}
-exists and is not  a directory
+existe e não é um diretório
+\linerefs{kernel/sysfile.c:/namei.old/,/^..}/},
 \lstinline{sys_link}
-increments its 
-\lstinline{ip->nlink}
-count.
-Then
+incrementa seu contador
+\lstinline{ip->nlink}.
+Depois,
 \lstinline{sys_link}
-calls
+chama
 \indexcode{nameiparent}
-to find the parent directory and final path element of
+para encontrar o diretório pai e o último elemento do caminho de
 \lstinline{new} 
-and creates a new directory entry pointing at
-\lstinline{old} 's
-inode
-The new parent directory must exist and
-be on the same device as the existing inode:
-inode numbers only have a unique meaning on a single disk.
-If an error like this occurs, 
+\lineref{kernel/sysfile.c:/nameiparent.new/}
+e cria uma nova entrada de diretório apontando para o inode de
+\lstinline{old}
+\lineref{kernel/sysfile.c:/\|\| dirlink/}.
+O novo diretório pai deve existir e estar no mesmo dispositivo que o inode existente:
+números de inode só têm significado único em um único disco.
+Se um erro como esse ocorrer,
 \indexcode{sys_link}
-must go back and decrement
+deve voltar e decrementar
 \lstinline{ip->nlink}.
 
-Transactions simplify the implementation because it requires updating multiple
-disk blocks, but we don't have to worry about the order in which we do
-them. They either will all succeed or none.
-For example, without transactions, updating
+As transações simplificam a implementação porque é necessário atualizar múltiplos
+blocos no disco, mas não precisamos nos preocupar com a ordem em que fazemos
+essas atualizações. Ou todas terão sucesso ou nenhuma.
+Por exemplo, sem transações, atualizar
 \lstinline{ip->nlink}
-before creating a link, would put the file system temporarily in an unsafe
-state, and a crash in between could result in havoc.
-With transactions we don't have to worry about this.
+antes de criar o link colocaria o sistema de arquivos temporariamente em um estado
+inseguro, e uma falha no meio desse processo poderia resultar em corrupção.
+Com transações, não precisamos nos preocupar com isso.
 
 \lstinline{sys_link}
-creates a new name for an existing inode.
-The function
+cria um novo nome para um inode existente.
+A função
 \indexcode{create}
-creates a new name for a new inode.
-It is a generalization of the three file creation
-system calls:
+\lineref{kernel/sysfile.c:/^create/}
+cria um novo nome para um novo inode.
+Ela é uma generalização das três chamadas de sistema para criação de arquivos:
 \indexcode{open}
-with the
+com o sinalizador
 \indexcode{O_CREATE}
-flag makes a new ordinary file,
+cria um novo arquivo comum,
 \indexcode{mkdir}
-makes a new directory,
-and
+cria um novo diretório,
+e
 \indexcode{mkdev}
-makes a new device file.
-Like
+cria um novo arquivo de dispositivo.
+Como
 \indexcode{sys_link},
 \indexcode{create}
-starts by calling
+começa chamando
 \indexcode{nameiparent}
-to get the inode of the parent directory.
-It then calls
+para obter o inode do diretório pai.
+Depois, chama
 \indexcode{dirlookup}
-to check whether the name already exists
-If the name does exist, 
-\lstinline{create}'s
-behavior depends on which system call it is being used for:
-\lstinline{open}
-has different semantics from 
-\indexcode{mkdir}
-and
-\indexcode{mkdev}.
-If
+para verificar se o nome já existe
+\lineref{kernel/sysfile.c:/dirlookup.*[^=]=.0/}.
+Se o nome já existir, o comportamento de 
 \lstinline{create}
-is being used on behalf of
+depende da chamada de sistema sendo usada:
+\lstinline{open}
+tem semânticas diferentes de 
+\indexcode{mkdir}
+e
+\indexcode{mkdev}.
+Se
+\lstinline{create}
+está sendo usado por
 \lstinline{open}
 (\lstinline{type}
 \lstinline{==}
 \indexcode{T_FILE})
-and the name that exists is itself
-a regular file,
-then 
+e o nome existente for um arquivo regular,
+então
 \lstinline{open}
-treats that as a success,
-so
+considera isso um sucesso,
+e
 \lstinline{create}
-does too
-Otherwise, it is an error
-If the name does not already exist,
+também
+\lineref{kernel/sysfile.c:/^......return.ip/}.
+Caso contrário, é um erro
+\linerefs{kernel/sysfile.c:/^......return.ip/+1,/return.0/}.
+Se o nome ainda não existir,
 \lstinline{create}
-now allocates a new inode with
+aloca um novo inode com
 \indexcode{ialloc}
-If the new inode is a directory, 
+\lineref{kernel/sysfile.c:/ialloc/}.
+Se o novo inode for um diretório, 
 \lstinline{create}
-initializes it with
+o inicializa com as entradas
 \indexcode{.}
-and
-\indexcode{..}
-entries.
-Finally, now that the data is initialized properly,
+e
+\indexcode{..}.
+Por fim, agora que os dados estão devidamente inicializados,
 \indexcode{create}
-can link it into the parent directory
+pode vinculá-lo ao diretório pai
+\lineref{kernel/sysfile.c:/if.dirlink/}.
 \lstinline{create},
-like
+como
 \indexcode{sys_link},
-holds two inode locks simultaneously:
+mantém dois locks de inode simultaneamente:
 \lstinline{ip}
-and
+e
 \lstinline{dp}.
-There is no possibility of deadlock because
-the inode
+Não há possibilidade de deadlock porque
+o inode
 \lstinline{ip}
-is freshly allocated: no other process in the system
-will hold 
-\lstinline{ip} 's
-lock and then try to lock
+foi recém-alocado: nenhum outro processo no sistema
+segurará o lock de
+\lstinline{ip}
+e depois tentará bloquear
 \lstinline{dp}.
 
-Using
+Usando
 \lstinline{create},
-it is easy to implement
+é fácil implementar
 \indexcode{sys_open},
-\indexcode{sys_mkdir},
-and
+\indexcode{sys_mkdir}
+e
 \indexcode{sys_mknod}.
 \lstinline{sys_open}
-is the most complex, because creating a new file is only
-a small part of what it can do.
-If
+\lineref{kernel/sysfile.c:/^sys_open/}
+é o mais complexo, porque criar um novo arquivo é apenas
+uma pequena parte do que ele pode fazer.
+Se
 \indexcode{open}
-is passed the
-\indexcode{O_CREATE}
-flag, it calls
+recebe o sinalizador
+\indexcode{O_CREATE},
+ele chama
 \lstinline{create}
-Otherwise, it calls
+\lineref{kernel/sysfile.c:/create.*T_FILE/}.
+Caso contrário, chama
 \indexcode{namei}
+\lineref{kernel/sysfile.c:/if..ip.=.namei.path/}.
 \lstinline{create}
-returns a locked inode, but 
+retorna um inode com lock, mas
 \lstinline{namei}
-does not, so
+não, então
 \indexcode{sys_open}
-must lock the inode itself.
-This provides a convenient place to check that directories
-are only opened for reading, not writing.
-Assuming the inode was obtained one way or the other,
+deve fazer o lock do inode por conta própria.
+Isso oferece um ponto conveniente para verificar que diretórios
+só estão sendo abertos para leitura, não escrita.
+Assumindo que o inode foi obtido de alguma forma,
 \lstinline{sys_open}
-allocates a file and a file descriptor
-and then fills in the file
-Note that no other process can access the partially initialized file since it is only
-in the current process's table.
+aloca um arquivo e um descritor de arquivo
+\lineref{kernel/sysfile.c:/filealloc.*fdalloc/}
+e então preenche o arquivo
+\linerefs{kernel/sysfile.c:/type.=.FD_INODE/,/writable/}.
+Note que nenhum outro processo pode acessar o arquivo parcialmente inicializado,
+já que ele está apenas na tabela do processo atual.
 
-Chapter~\ref{CH:SCHED} examined the implementation of pipes
-before we even had a file system.
-The function
+O Capítulo~\ref{CH:SCHED} examinou a implementação de pipes
+antes mesmo de termos um sistema de arquivos.
+A função
 \indexcode{sys_pipe}
-connects that implementation to the file system
-by providing a way to create a pipe pair.
-Its argument is a pointer to space for two integers,
-where it will record the two new file descriptors.
-Then it allocates the pipe and installs the file descriptors.
+conecta essa implementação ao sistema de arquivos
+fornecendo uma forma de criar um par de pipes.
+Seu argumento é um ponteiro para um espaço de dois inteiros,
+onde ela registrará os dois novos descritores de arquivo.
+Depois, aloca o pipe e instala os descritores.
+
 %% 
 %%  -------------------------------------------
 %% 
-\section{Real world}
+\section{Mundo real}
 
-The buffer cache in a real-world operating system is significantly
-more complex than xv6's, but it serves the same two purposes:
-caching and synchronizing access to the disk.
-Xv6's buffer cache, like V6's, uses a simple least recently used (LRU)
-eviction policy; there are many more complex
-policies that can be implemented, each good for some
-workloads and not as good for others.
-A more efficient LRU cache would eliminate the linked list,
-instead using a hash table for lookups and a heap for LRU evictions.
-Modern buffer caches are typically integrated with the
-virtual memory system to support memory-mapped files.
+O cache de blocos em um sistema operacional real é significativamente
+mais complexo que o do xv6, mas serve aos mesmos dois propósitos:
+armazenar em cache e sincronizar o acesso ao disco.
+O cache de blocos do xv6, como o do V6, usa uma política simples de substituição
+de uso menos recente (LRU); há políticas muito mais complexas
+que podem ser implementadas, cada uma adequada para alguns
+tipos de carga e não tão boa para outros.
+Um cache LRU mais eficiente eliminaria a lista encadeada,
+usando em vez disso uma tabela de hash para buscas e uma heap para remoções LRU.
+Caches modernos geralmente são integrados ao sistema de memória virtual
+para suportar arquivos mapeados em memória.
 
-Xv6's logging system is inefficient.
-A commit cannot occur concurrently with file-system system calls.
-The system logs entire blocks, even if
-only a few bytes in a block are changed. It performs synchronous
-log writes, a block at a time, each of which is likely to require an
-entire disk rotation time. Real logging systems address all of these
-problems.
+O sistema de logging do xv6 é ineficiente.
+Um commit não pode ocorrer simultaneamente com chamadas de sistema do sistema de arquivos.
+O sistema registra blocos inteiros, mesmo que
+apenas alguns bytes em um bloco sejam modificados. Ele realiza gravações
+síncronas no log, um bloco de cada vez, cada uma provavelmente exigindo
+uma rotação inteira do disco. Sistemas reais de logging tratam todos esses
+problemas.
 
-Logging is not the only way to provide crash recovery. Early file systems
-used a scavenger during reboot (for example, the UNIX
-\indexcode{fsck}
-program) to examine every file and directory and the block and inode
-free lists, looking for and resolving inconsistencies. Scavenging can take
-hours for large file systems, and there are situations where it is not
-possible to resolve inconsistencies in a way that causes the original
-system calls to be atomic. Recovery
-from a log is much faster and causes system calls to be atomic
-in the face of crashes.
+Logging não é a única forma de fornecer recuperação após falhas. Sistemas de arquivos antigos
+usavam um varredor durante a reinicialização (por exemplo, o programa UNIX
+\indexcode{fsck})
+para examinar todos os arquivos e diretórios e as listas de blocos e inodes livres,
+procurando e resolvendo inconsistências. Esse processo pode levar
+horas em sistemas de arquivos grandes, e há situações em que não é
+possível resolver inconsistências de forma que torne as chamadas de sistema originais atômicas.
+A recuperação a partir de um log é muito mais rápida e garante que chamadas de sistema
+sejam atômicas mesmo diante de falhas.
 
-Xv6 uses the same basic on-disk layout of inodes and directories
-as early UNIX;
-this scheme has been remarkably persistent over the years.
-BSD's UFS/FFS and Linux's ext2/ext3 use essentially the same data structures.
-The most inefficient part of the file system layout is the directory,
-which requires a linear scan over all the disk blocks during each lookup.
-This is reasonable when directories are only a few disk blocks,
-but is expensive for directories holding many files.
-Microsoft Windows's NTFS, macOS's HFS, and Solaris's ZFS, just to name a few, implement
-a directory as an on-disk balanced tree of blocks.
-This is complicated but guarantees logarithmic-time directory lookups.
+O xv6 usa o mesmo layout básico em disco de inodes e diretórios
+que o UNIX antigo;
+esse esquema tem se mantido notavelmente persistente ao longo dos anos.
+O UFS/FFS do BSD e o ext2/ext3 do Linux usam essencialmente as mesmas estruturas de dados.
+A parte mais ineficiente do layout do sistema de arquivos é o diretório,
+que requer uma varredura linear sobre todos os blocos do disco em cada busca.
+Isso é razoável quando os diretórios têm apenas alguns blocos,
+mas é custoso para diretórios com muitos arquivos.
+O NTFS do Windows, o HFS do macOS e o ZFS do Solaris, por exemplo,
+implementam diretórios como árvores balanceadas em disco de blocos.
+Isso é mais complexo, mas garante buscas em tempo logarítmico.
 
-Xv6 is naive about disk failures: if a disk
-operation fails, xv6 panics.
-Whether this is reasonable depends on the hardware:
-if an operating systems sits atop special hardware that uses
-redundancy to mask disk failures, perhaps the operating system
-sees failures so infrequently that panicking is okay.
-On the other hand, operating systems using plain disks
-should expect failures and handle them more gracefully,
-so that the loss of a block in one file doesn't affect the
-use of the rest of the file system.
+O xv6 é ingênuo quanto a falhas de disco: se uma operação de disco falha, o xv6 entra em pânico.
+Se isso é aceitável ou não depende do hardware:
+se o sistema operacional está rodando sobre hardware especial que usa
+redundância para mascarar falhas de disco, talvez falhas sejam tão raras que a pane seja aceitável.
+Por outro lado, sistemas operacionais que usam discos comuns
+devem esperar falhas e lidar com elas de forma mais robusta,
+de forma que a perda de um bloco em um arquivo não afete o
+uso do restante do sistema de arquivos.
 
-Xv6 requires that the file system
-fit on one disk device and not change in size.
-As large databases and multimedia files drive storage
-requirements ever higher, operating systems are developing ways
-to eliminate the ``one disk per file system'' bottleneck.
-The basic approach is to combine many disks into a single
-logical disk.  Hardware solutions such as RAID are still the 
-most popular, but the current trend is moving toward implementing
-as much of this logic in software as possible.
-These software implementations typically 
-allow rich functionality like growing or shrinking the logical
-device by adding or removing disks on the fly.
-Of course, a storage layer that can grow or shrink on the fly
-requires a file system that can do the same: the fixed-size array
-of inode blocks used by xv6 would not work well
-in such environments.
-Separating disk management from the file system may be
-the cleanest design, but the complex interface between the two
-has led some systems, like Sun's ZFS, to combine them.
+O xv6 requer que o sistema de arquivos
+caiba em um único dispositivo de disco e que seu tamanho não varie.
+À medida que grandes bancos de dados e arquivos multimídia aumentam
+as necessidades de armazenamento, sistemas operacionais estão desenvolvendo formas
+de eliminar o gargalo de ``um disco por sistema de arquivos''.
+A abordagem básica é combinar vários discos em um único
+disco lógico. Soluções de hardware como RAID ainda são as 
+mais populares, mas a tendência atual é implementar
+o máximo possível dessa lógica em software.
+Essas implementações geralmente
+permitem funcionalidades como expandir ou reduzir o dispositivo lógico dinamicamente.
+Claro que uma camada de armazenamento que cresce ou diminui dinamicamente
+requer um sistema de arquivos que possa fazer o mesmo: o array de tamanho fixo
+de blocos de inode usado pelo xv6 não funcionaria bem
+nesses ambientes.
+Separar o gerenciamento de disco do sistema de arquivos pode ser
+um design mais limpo, mas a interface complexa entre os dois
+levou alguns sistemas, como o ZFS da Sun, a combiná-los.
 
-Xv6's file system lacks many other features of modern file systems; for example,
-it lacks support for snapshots and incremental backup.
+O sistema de arquivos do xv6 carece de muitos recursos dos sistemas modernos; por exemplo,
+não há suporte para snapshots e backups incrementais.
 
-Modern Unix systems allow many kinds of resources to be
-accessed with the same system calls as on-disk storage:
-named pipes, network connections,
-remotely-accessed network file systems, and monitoring and control
-interfaces such as
+Sistemas Unix modernos permitem que muitos tipos de recursos sejam
+acessados com as mesmas chamadas de sistema usadas para arquivos em disco:
+pipes nomeados, conexões de rede,
+sistemas de arquivos acessados remotamente e interfaces de monitoramento e controle
+como o
 \lstinline{/proc}.
-Instead of xv6's
+Em vez das instruções
 \lstinline{if}
-statements in
+em
 \indexcode{fileread}
-and
-\indexcode{filewrite},
-these systems typically give each open file a table of function pointers,
-one per operation,
-and call the function pointer to invoke that inode's
-implementation of the call.
-Network file systems and user-level file systems 
-provide functions that turn those calls into network RPCs
-and wait for the response before returning.
+e
+\indexcode{filewrite}
+do xv6,
+esses sistemas geralmente dão a cada arquivo aberto uma tabela de ponteiros de função,
+um por operação,
+e invocam o ponteiro correspondente à chamada implementada por aquele inode.
+Sistemas de arquivos em rede e em espaço de usuário
+implementam funções que transformam essas chamadas em RPCs de rede
+e aguardam a resposta antes de retornar.
+
 %% 
 %%  -------------------------------------------
 %% 
-\section{Exercises}
+\section{Exercícios}
 
 \begin{enumerate}
 
-\item Why panic in
-\lstinline{balloc} ?
-Can xv6 recover?
+\item Por que fazer \lstinline{panic} em
+\lstinline{balloc}?
+O xv6 pode se recuperar?
 
-\item Why panic in
-\lstinline{ialloc} ?
-Can xv6 recover?
+\item Por que fazer \lstinline{panic} em
+\lstinline{ialloc}?
+O xv6 pode se recuperar?
 
-\item Why doesn't
+\item Por que
 \lstinline{filealloc}
-panic when it runs out of files?
-Why is this more common and therefore worth handling?
+não faz \lstinline{panic} quando os arquivos se esgotam?
+Por que isso é mais comum e, portanto, vale a pena ser tratado?
 
-\item Suppose the file corresponding to 
+\item Suponha que o arquivo correspondente a
 \lstinline{ip}
-gets unlinked by another process
-between 
-\lstinline{sys_link} 's
-calls to 
+seja desvinculado por outro processo
+entre as chamadas de
+\lstinline{sys_link}
+para
 \lstinline{iunlock(ip)}
-and
+e
 \lstinline{dirlink}.
-Will the link be created correctly?
-Why or why not?
+O link será criado corretamente?
+Por que ou por que não?
 
 \item
 \lstinline{create}
-makes four function calls (one to
+faz quatro chamadas de função (uma para
 \lstinline{ialloc}
-and three to
+e três para
 \lstinline{dirlink})
-that it requires to succeed.
-If any doesn't,
+das quais depende que todas tenham sucesso.
+Se alguma falhar,
 \lstinline{create}
-calls
+chama
 \lstinline{panic}.
-Why is this acceptable?
-Why can't any of those four calls fail?
+Por que isso é aceitável?
+Por que nenhuma dessas chamadas pode falhar?
 
 \item
 \lstinline{sys_chdir}
-calls
+chama
 \lstinline{iunlock(ip)}
-before
+antes de
 \lstinline{iput(cp->cwd)},
-which might try to lock
+o que pode tentar bloquear
 \lstinline{cp->cwd},
-yet postponing
+mas adiar
 \lstinline{iunlock(ip)}
-until after the
+até depois de
 \lstinline{iput}
-would not cause deadlocks.
-Why not?
+não causaria deadlocks.
+Por que não?
 
-\item Implement the
+\item Implemente a chamada de sistema
+\lstinline{lseek}. Suportar
 \lstinline{lseek}
-system call.  Supporting
-\lstinline{lseek}
-will also require that you modify
+também exigirá que você modifique
 \lstinline{filewrite}
-to fill holes in the file with zero if
+para preencher lacunas no arquivo com zeros se
 \lstinline{lseek}
-sets
+definir
 \lstinline{off}
-beyond
+além de
 \lstinline{f->ip->size.}
 
-\item Add
+\item Adicione
 \lstinline{O_TRUNC}
-and
+e
 \lstinline{O_APPEND}
-to
+à
 \lstinline{open},
-so that
+de forma que os operadores
 \lstinline{>}
-and
+e
 \lstinline{>>}
-operators work in the shell.
+funcionem no shell.
 
-\item Modify the file system to support symbolic links.
+\item Modifique o sistema de arquivos para suportar links simbólicos.
 
-\item Modify the file system to support named pipes.
+\item Modifique o sistema de arquivos para suportar pipes nomeados.
 
-\item Modify the file and VM system to support memory-mapped files.
+\item Modifique o sistema de arquivos e o sistema de memória virtual para suportar arquivos mapeados em memória.
 
 \end{enumerate}
