@@ -1,693 +1,425 @@
-%   terminology:
-%     process: refers to execution in user space, or maybe struct proc &c
-%     process memory: the lower part of the address space
-%     process has one thread with two stacks (one for in kernel mode and one for
-%     in user mode)
-% talk a little about initial page table conditions:
-%     paging not on, but virtual mostly mapped direct to physical,
-%     which is what things look like when we turn paging on as well
-%     since paging is turned on after we create first process.
-%   mention why still have SEG_UCODE/SEG_UDATA?
-%   do we ever really say what the low two bits of %cs do?
-%     in particular their interaction with PTE_U
-%   sidebar about why it is extern char[]
-
-\chapter{Operating system organization}
-\label{CH:FIRST}
-
-A key requirement for an operating system is to support several activities at once.  For
-example, using the system call interface described in
-Chapter~\ref{CH:UNIX}
-a process can start new processes with 
-\lstinline{fork}.
-The operating system must 
-\indextext{time-share} 
-the resources of the computer among these processes.
-For example, even if there are more processes
-than there are hardware CPUs, the operating
-system must ensure that all of the processes
-get a chance to execute.  The operating system must also arrange for
-\indextext{isolation} 
-between the processes.
-That is, if one process has a bug and malfunctions,
-it shouldn't affect processes that
-don't depend on the buggy process.
-Complete isolation, however, is too strong, since it should be possible for
-processes to intentionally interact; pipelines are an example.
-Thus
-an operating system must fulfill three requirements: multiplexing, isolation,
-and interaction.
-
-This chapter provides an overview of how operating systems are
-organized to achieve these three requirements.  It turns out there are
-many ways to do so, but this text focuses on mainstream designs
-centered around a \indextext{monolithic kernel}, which is used by many
-Unix operating systems.  This chapter also provides an overview of an
-xv6 process, which is the unit of isolation in xv6, and the
-creation of the first process when xv6 starts.
-
-Xv6 runs on a \indextext{multi-core}\footnote{
-By ``multi-core'' this text means multiple CPUs that share memory but execute
-in parallel, each with its own set of registers.
-This text sometimes uses the term
-\indextext{multiprocessor} as a synonym for multi-core,
-though multiprocessor can also refer more specifically to a computer with
-several distinct processor chips.} RISC-V microprocessor,
-and much of its low-level
-functionality (for example, its process implementation) is specific to
-RISC-V.  RISC-V is a 64-bit CPU, and xv6 is written in ``LP64'' C,
-which means long (L) and pointers (P) in the C programming language
-are 64 bits, but an {\tt int} is 32 bits.  This book assumes the reader has done
-a bit of machine-level programming on some architecture, and will
-introduce RISC-V-specific ideas as they come up.
-The user-level ISA~\cite{riscv:user} and privileged
-architecture~\cite{riscv:priv} documents are the complete
-specifications.
-You may also refer to
-``The RISC-V Reader: An Open Architecture
-Atlas''~\cite{riscv}.
-
-The CPU in a complete computer is surrounded by support hardware, much
-of it in the form of I/O interfaces. Xv6 is written for the support
-hardware simulated by qemu's ``-machine virt'' option. This includes
-RAM, a ROM containing boot code, a serial connection to the user's
-keyboard/screen, and a disk for storage.
-
-%% 
-\section{Abstracting physical resources}
-%% 
-
-The first question one might ask when encountering an operating system is why
-have it at all?  That is, one could implement the system calls in
-Figure~\ref{fig:api}
-as a library, with which applications link.  In this plan,
-each application could even have its own library tailored to its needs.
-Applications could directly interact with hardware resources
-and use those resources in the best way for the application (e.g., to achieve
-high or predictable performance).  Some operating systems for
-embedded devices or real-time systems are organized in this way.
-
-The downside of this library approach is that, if there is more than one
-application running, the applications must be well-behaved.
-For example, each application must periodically give up the
-CPU so that other applications can run.
-Such a 
-\textit{cooperative} 
-time-sharing scheme may be OK if all applications trust each
-other and have no bugs. It's more typical for applications
-to not trust each other, and to have bugs, so one often wants
-stronger isolation than a cooperative scheme provides.
-
-To achieve strong isolation it's helpful to forbid applications from
-directly accessing sensitive hardware resources, and instead to abstract the
-resources into services.  For example, Unix applications interact with storage
-only through the file system's
-\lstinline{open},
-\lstinline{read},
-\lstinline{write}, 
-and
-\lstinline{close}
-system calls,
-instead of reading and writing the disk directly. 
-This provides the application with the convenience of pathnames, and it allows
-the operating system (as the implementer of the interface) to manage the disk. 
-Even if isolation is not a concern,
-programs that interact intentionally (or just wish to keep
-out of each other's way) are likely to find a file system a more convenient
-abstraction than direct use of the disk.
-
-Similarly, Unix transparently switches hardware CPUs among processes,
-saving and restoring register state as necessary,
-so that applications don't have to be
-aware of time-sharing.  This transparency allows the operating system to share
-CPUs even if some applications are in infinite loops.
-
-As another example, Unix processes use 
-\lstinline{exec}
-to build up their memory image, instead of directly interacting with physical
-memory.  This allows the operating system to decide where to place a process in
-memory; if memory is tight, the operating system might even store some of
-a process's data on disk.
-\lstinline{exec}
-also provides
-users with the convenience of a file system to store executable program images.  
-
-Many forms of interaction among Unix processes occur via file descriptors.
-Not only do file descriptors abstract away many details (e.g.,
-where data in a pipe or file is stored), they are also defined in a
-way that simplifies interaction.
-For example, if one application in a pipeline fails, the kernel
-generates an end-of-file signal for the next process in the pipeline.
-
-The system-call interface in
-Figure~\ref{fig:api}
-is carefully designed to provide both programmer convenience and
-the possibility of strong isolation.  The Unix interface
-is not the only way to abstract resources, but it has proved to be a good
-one.
-
-%% 
-\section{User mode, supervisor mode, and system calls}
-%% 
-
-Strong isolation requires a hard boundary between applications and the operating
-system.  If the application makes a mistake, we don't want the operating system
-to fail or other applications to fail. Instead, the operating system should be
-able to clean up the failed application and continue running other applications.
-To achieve strong isolation, the operating system must arrange that applications cannot modify (or even
-read) the operating system's data structures and instructions and that
-applications cannot access other processes' memory.
-
-CPUs provide hardware support for strong isolation.   For
-example, RISC-V has three modes in which
-the CPU can execute instructions:
-\indextext{machine mode},
-\indextext{supervisor mode}, and
-\indextext{user mode}.
-Instructions executing in machine mode have full privilege; a
-CPU starts in machine mode.  Machine mode is mostly intended for
-setting up the computer during boot.  Xv6 executes a few lines in machine mode and
-then changes to supervisor mode.
-
-In supervisor mode the CPU is allowed to execute 
-\indextext{privileged instructions}:
-for example, enabling and disabling interrupts,  reading and writing
-the register that holds the address of a page table, etc.
-If an application in user mode attempts to execute
-a privileged instruction, then the CPU doesn't execute the instruction, but switches
-to supervisor mode so that supervisor-mode code can terminate the application,
-because it did something it shouldn't be doing. 
-Figure~\ref{fig:os}
-in Chapter~\ref{CH:UNIX} illustrates this organization.  An application can
-execute only user-mode instructions (e.g., adding numbers, etc.) and is said to
-be running in 
-\indextext{user space},
-while the software in supervisor mode can also execute privileged instructions and
-is said to be running in
-\indextext{kernel space}.
-The software running in kernel space (or in supervisor mode) is called
-the
-\indextext{kernel}.
-
-An application that wants to invoke a kernel function (e.g., the
-\lstinline{read}
-system call in xv6) must 
-transition to the kernel; an application \emph{cannot} invoke a kernel
-function directly.  CPUs provide a special instruction that switches the
-CPU from user mode to supervisor mode and enters the kernel at an entry point
-specified by the kernel.  (RISC-V
-provides the 
-\indexcode{ecall}
-instruction for this purpose.)  Once the CPU has switched to supervisor mode,
-the kernel can then validate the arguments of the system call (e.g.,
-check if the address passed to the system call is part of the application's memory), decide whether
-the application is allowed to perform the requested operation (e.g.,
-check if the application is allowed to write the specified file), and then deny it
-or execute it.  It is important that the kernel control the entry point for
-transitions to supervisor mode; if the application could decide the kernel entry
-point, a malicious application could, for example, enter the kernel at a point where the
-validation of arguments is skipped.
-
-%% 
-\section{Kernel organization}
-%% 
-
-A key design question is what part of the operating
-system should run in supervisor mode. 
-One possibility is that the entire operating system resides
-in the kernel, so that the implementations of all system calls
-run in supervisor mode.
-This organization is called a
-\indextext{monolithic kernel}.
-
-In this organization the entire operating system consists of a single
-program running with full hardware
-privilege. This organization is convenient because the OS designer doesn't have
-to decide which parts of the operating system don't need full hardware
-privilege.  Furthermore, it is easier for different parts of the operating system to
-cooperate.  For example, an operating system might have a buffer cache that can
-be shared both by the file system and the virtual memory system. 
-
-A downside of the monolithic organization is that the interactions among
-different parts of the operating system are often complex (as we will see in the
-rest of this text), and therefore it is easy for an operating system developer
-to make a mistake.  In a monolithic kernel, a mistake is fatal, because an error
-in supervisor mode will often cause the kernel to fail.  If the kernel fails,
-the computer stops working, and thus all applications fail too.  The computer
-must reboot to start again.
-
-To reduce the risk of mistakes in the kernel, OS designers can minimize the
-amount of operating system code that runs in supervisor mode, and execute the
-bulk of the operating system in user mode.
-This kernel organization is called a
-\indextext{microkernel}.
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.5]{fig/mkernel.pdf}
-\caption{A microkernel with a file-system server}
-\label{fig:mkernel}
-\end{figure}
-
-Figure~\ref{fig:mkernel}
-illustrates this microkernel design.  In the figure, the file system runs as a
-user-level process.  OS services running as processes are called servers.
-To allow applications to interact with the
-file server, the kernel provides an inter-process communication
-mechanism to send messages from one
-user-mode process to another.  For example, if an application like the shell
-wants to read or write a file, it sends a message to the file server and waits
-for a response. 
-
-In a microkernel, the kernel interface consists of a few low-level
-functions for starting applications, sending messages,
-accessing device hardware, etc.  This organization allows the kernel to be 
-relatively simple, as most of the operating system
-resides in user-level servers.
-
-In the real world, both monolithic kernels and microkernels are
-popular. Many
-Unix kernels are monolithic. For example, Linux has a monolithic kernel,
-although some OS functions run as user-level servers (e.g., the window
-system).  Linux delivers high performance to OS-intensive applications, partially
-because the subsystems of the kernel can be tightly integrated.
-
-Operating systems such as Minix, L4, and QNX are organized as a microkernel with
-servers, and have seen wide deployment in embedded settings.  A
-variant of L4, seL4, is small enough that it has been verified for
-memory safety and other security properties~\cite{sel4}.
-
-There is much debate among developers of operating systems about which
-organization is better, and there is no conclusive evidence one way or
-the other.  Furthermore, it depends much on what ``better'' means:
-faster performance, smaller code size, reliability of the kernel,
-reliability of the complete operating system (including user-level
-services), etc.
-
-There are also practical considerations that may be more important
-than the question of which organization.  Some operating systems
-have a microkernel but run some of the user-level services in kernel
-space for performance reasons.  Some operating systems have monolithic
-kernels because that is how they started and there is little incentive
-to move to a pure microkernel organization, because new features may
-be more important than rewriting the existing operating system to fit a microkernel
-design.
-
-From this book's perspective, microkernel and monolithic operating
-systems share many key ideas.  They implement system calls, they use
-page tables, they handle interrupts, they support processes, they use
-locks for concurrency control, they implement a file system,
-etc. This book focuses on these core ideas.
-
-Xv6 is
-implemented as a monolithic kernel, like most Unix operating systems.
-Thus, the xv6 kernel interface corresponds to the operating system
-interface, and the kernel implements the complete operating system.  Since 
-xv6 doesn't provide many services, its kernel is smaller than some
-microkernels, but conceptually xv6 is monolithic.  
-
-\section{Code: xv6 organization}
-
-\begin{figure}[t]
-\center
-\begin{tabular}{l|l}
-{\bf File} & {\bf Description} \\
-\midrule
-bio.c & Disk block cache for the file system. \\
-console.c & Connect to the user keyboard and screen. \\
-entry.S & Very first boot instructions. \\
-exec.c & exec() system call. \\
-file.c & File descriptor support. \\
-fs.c & File system. \\
-kalloc.c & Physical page allocator. \\
-kernelvec.S & Handle traps from kernel. \\
-log.c & File system logging and crash recovery. \\
-main.c & Control initialization of other modules during boot. \\
-pipe.c & Pipes. \\
-plic.c & RISC-V interrupt controller. \\
-printf.c & Formatted output to the console. \\
-proc.c & Processes and scheduling. \\
-sleeplock.c & Locks that yield the CPU. \\
-spinlock.c & Locks that don't yield the CPU. \\
-start.c & Early machine-mode boot code. \\
-string.c & C string and byte-array library. \\
-swtch.S & Thread switching. \\
-syscall.c & Dispatch system calls to handling function. \\
-sysfile.c & File-related system calls. \\
-sysproc.c & Process-related system calls. \\
-trampoline.S & Assembly code to switch between user and kernel. \\
-trap.c & C code to handle and return from traps and interrupts. \\
-uart.c & Serial-port console device driver. \\
-virtio\_disk.c & Disk device driver. \\
-vm.c & Manage page tables and address spaces. \\
-\end{tabular}
-\caption{Xv6 kernel source files.}
-\label{fig:source}
-\end{figure}
-
-The xv6 kernel source is in the {\tt kernel/} sub-directory. The
-source is divided into files, following a rough notion of modularity;
-Figure~\ref{fig:source} lists the files.  The inter-module interfaces
-are defined in \lstinline{defs.h} \fileref{kernel/defs.h}.
-
-%% 
-\section{Process overview}
-%% 
-
-The unit of isolation in xv6 (as in other Unix operating systems) is a 
-\indextext{process}.
-The process abstraction prevents one process from wrecking or spying on
-another process's memory, CPU, file descriptors, etc.  It also prevents a process
-from wrecking the kernel itself, so that a process can't subvert the kernel's
-isolation mechanisms.
-The kernel must implement the process abstraction with care because
-a buggy or malicious application may trick the kernel or hardware into doing
-something bad (e.g., circumventing isolation).  The mechanisms used by
-the kernel to implement processes include the user/supervisor mode flag, address spaces,
-and time-slicing of threads.
-
-To help enforce isolation, the process abstraction provides the
-illusion to a program that it has its own private machine.  A process provides
-a program with what appears to be a private memory system, or
-\indextext{address space}, 
-which other processes cannot read or write.
-A process also provides the program with what appears to be its own
-CPU to execute the program's instructions.
-
-Xv6 uses page tables (which are implemented by hardware) to give each process
-its own address space. The RISC-V page table
-translates (or ``maps'') a
-\indextext{virtual address}
-(the address that an RISC-V instruction manipulates) to a
-\indextext{physical address}
-(an address that the CPU sends to main memory).
-
-\begin{figure}[t]
-\centering
-\includegraphics[scale=0.5]{fig/as.pdf}
-\caption{Layout of a process's virtual address space}
-\label{fig:as}
-\end{figure}
-
-Xv6 maintains a separate page table for each process that defines that process's
-address space. As illustrated in 
-Figure~\ref{fig:as},
-an address space includes the process's
-\indextext{user memory}
-starting at virtual address zero. Instructions come first,
-followed by global variables, then the stack,
-and finally a ``heap'' area (for malloc)
-that the process can expand as needed.
-There are a number of factors that limit the
-maximum size of a process's address space:
-pointers on the RISC-V are 64 bits wide;
-the hardware uses only the low 39 bits when
-looking up virtual addresses in page tables;
-and xv6 uses only 38 of those 39 bits.
-Thus, the maximum address is $2^{38}-1$ =
-At the top of the address space xv6 places
-a \indextext{trampoline} page (4096 bytes)
-and a \indextext{trapframe} page.  Xv6 uses these two pages
-to transition into the kernel and back;
-the trampoline page contains the code to transition in and out
-of the kernel, and the trapframe is where the kernel saves
-the process's user registers,
-as Chapter~\ref{CH:TRAP} explains.
-
-The xv6 kernel maintains many pieces of state for each process,
-which it gathers into a
-\indexcode{struct proc}
-A process's most important pieces of kernel state are its 
-page table, its kernel stack, and its run state.
-We'll use the notation
-\indexcode{p->xxx}
-to refer to elements of the
-\lstinline{proc}
-structure; for example,
-\indexcode{p->pagetable} is a pointer to the process's page table.
-
-Each process has a thread of control (or 
-\indextext{thread}
-for short) that holds the state needed to execute the process.
-At any given time, a thread might be executing on a CPU,
-or suspended (not executing, but capable of resuming executing
-in the future).
-To switch a CPU between processes,
-the kernel suspends the thread currently running on that CPU
-and saves its state,
-and restores the state of another process's previously-suspended
-thread.  Much of the state of a thread (local variables, function call return
-addresses) is stored on the thread's stacks.
-Each process has two stacks: a user stack and a kernel stack
-(\indexcode{p->kstack}).
-When the process is executing user instructions, only its user stack
-is in use, and its kernel stack is empty.
-When the process enters the kernel (for a system call or interrupt),
-the kernel code executes on the process's kernel stack; while
-a process is in the kernel, its user stack still contains saved
-data, but isn't actively used.
-A process's thread alternates between actively using its user stack
-and its kernel stack. The kernel stack is separate (and protected from
-user code) so that the kernel
-can execute even if a process has wrecked its user stack.
-
-A process can make a system call by executing the RISC-V \indexcode{ecall}
-instruction. This instruction raises the hardware privilege level and
-changes the program counter to a kernel-defined entry point.  The code
-at the entry point switches to the process's kernel stack and executes the kernel
-instructions that implement the system call.  When the system call
-completes, the kernel switches back to the user stack and returns to
-user space by calling the \indexcode{sret} instruction, which lowers
-the hardware privilege level and resumes executing user instructions
-just after the system call instruction.  A process's thread can
-``block'' in the kernel to wait for I/O, and resume where it left off
-when the I/O has finished.
-
-\indexcode{p->state} 
-indicates whether the process is allocated, ready
-to run, currently running on a CPU, waiting for I/O, or exiting.
-
-\indexcode{p->pagetable}
-holds the process's page table, in the format
-that the RISC-V hardware expects.
-Xv6 causes the paging hardware to use a process's
-\lstinline{p->pagetable}
-when executing that process in user space.
-A process's page table also serves as the record of the
-addresses of the physical pages allocated to store the process's
-memory.
-
-In summary, a process bundles two design ideas: an address space to
-give a process the illusion of its own memory, and a thread to give
-the process the illusion of its own CPU.  In xv6, a process consists
-of one address space and one thread.  In real operating systems a
-process may have more than one thread to take advantage of multiple CPUs.
-
-%% 
-\section{Code: starting xv6, the first process and system call}
-%% 
-To make xv6 more concrete, we'll outline how the kernel starts and
-runs the first process. The subsequent chapters will describe the
-mechanisms that show up in this overview in more detail.
-
-When the RISC-V computer powers on, it initializes
-itself and runs a boot loader which is stored in read-only
-memory.  The boot loader loads the xv6 kernel into memory.  Then, in
-machine mode, the CPU executes xv6 starting at
-\indexcode{_entry}
-The RISC-V starts with paging hardware disabled:
-virtual addresses map directly to physical addresses.
-
-The loader loads the xv6 kernel into memory at physical address
-\texttt{0x80000000}.
-The reason it places the kernel at
-\texttt{0x80000000}
-rather than
-\texttt{0x0}
-is because the address range
-\texttt{0x0:0x80000000}
-contains I/O devices.
-
-The instructions at
-\lstinline{_entry}
-set up a stack so that xv6 can run C code.
-Xv6 declares space for an initial stack,
-\lstinline{stack0},
-in the file
-\lstinline{start.c}
-The code at
-\lstinline{_entry}
-loads the stack pointer register
-\texttt{sp}
-with the address
-\lstinline{stack0+4096},
-the top of the stack, because the stack
-on RISC-V grows down.
-Now that the kernel has a stack,
-\lstinline{_entry}
-calls into C code at
-\lstinline{start}
-
-The function
-\lstinline{start}
-performs some configuration that is only allowed in
-machine mode, and then switches to supervisor mode.
-To enter supervisor mode, RISC-V
-provides the instruction
-\lstinline{mret}.
-This instruction is most often used to return from
-a previous call from supervisor mode to machine mode.
-\lstinline{start} isn't returning from such a call, but
-sets things up as if it were:
-it sets the previous privilege mode to
-supervisor in the register
-\lstinline{mstatus},
-it sets the return address to
-\lstinline{main}
-by writing
-\lstinline{main}'s
-address into
-the register
-\lstinline{mepc},
-disables virtual address translation in supervisor mode
-by writing
-\lstinline{0}
-into the page-table register
-\lstinline{satp},
-and delegates all interrupts and exceptions
-to supervisor mode.
-
-Before jumping into supervisor mode,
-\lstinline{start}
-performs one more task: it programs the clock
-chip to generate timer interrupts.
-With this housekeeping out of the way,
-\lstinline{start}
-``returns'' to supervisor
-mode by calling
-\lstinline{mret}.
-This causes the program counter to change
-to
-\lstinline{main}
-the address previously stored in \lstinline{mepc}.
-
-After
-\lstinline{main}
-initializes several devices and subsystems, 
-it creates the first process by calling 
-\lstinline{userinit}
-The first process executes a small program written in RISC-V assembly,
-which makes the first system call in xv6.
-\indexcode{initcode.S} 
-\lineref{user/initcode.S}{3} loads the number for the \lstinline{exec}
-system call, \lstinline{SYS_EXEC}
-into
-register {\tt a7},
-and then calls \lstinline{ecall} to re-enter the kernel.
-
-The kernel uses the number in register {\tt a7} in \lstinline{syscall}
-\lstinline{SYS_EXEC} to the function \lstinline{sys_exec}, which the kernel
-invokes.  As we saw in Chapter~\ref{CH:UNIX}, \indexcode{exec}
-replaces the memory and registers of the current process with a new
-program (in this case, \indexcode{/init}).
-
-Once the kernel has completed 
-\lstinline{exec},
-it returns to user space in
-the \lstinline{/init} process.
-\lstinline{init}
-creates a new console device file
-if needed
-and then opens it as file descriptors 0, 1, and 2.
-Then it starts a shell on the console.
-The system is up.
-
-\section{Security Model}
-
-You may wonder how the operating system deals with buggy or malicious
-code. Because coping with malice is strictly harder than dealing with
-accidental bugs, it's reasonable to 
-focus mostly on providing security against malice.
-Here's a high-level view of typical security assumptions and
-goals in operating system design.
-
-The operating system must assume that a process's user-level code will
-do its best to wreck the kernel or other processes. User code may try
-to dereference pointers outside its allowed address space; it may
-attempt to execute any RISC-V instructions, even those not intended
-for user code; it may try to read and write any RISC-V control
-register; it may try to directly access device hardware;
-and it may pass clever values to system calls in an attempt
-to trick the kernel into crashing or doing something stupid. The
-kernel's goal is to restrict each user processes so that all it can do is
-read/write/execute its own user memory, use the 32 general-purpose
-RISC-V registers, and affect the kernel and other processes in the
-ways that system calls are intended to allow. The kernel must prevent
-any other actions. This is typically an absolute requirement in kernel
-design.
-
-The expectations for the kernel's own code are quite different. Kernel
-code is assumed to be written by well-meaning and careful programmers.
-Kernel code is expected to be bug-free, and certainly to contain
-nothing malicious. This assumption affects how we analyze kernel code.
-For example, there are many internal kernel functions (e.g., the spin
-locks) that would cause serious problems if kernel code used them
-incorrectly. When examining any specific piece of kernel code, we'll
-want to convince ourselves that it behaves correctly. We assume,
-however, that kernel code in general is correctly written, and follows
-all the rules about use of the kernel's own functions and data
-structures. At the hardware level, the RISC-V CPU, RAM, disk, etc. are
-assumed to operate as advertised in the documentation, with no
-hardware bugs.
-
-Of course in real life things are not so straightforward. It's
-difficult to prevent clever user code from making a system unusable
-(or causing it to panic) by consuming kernel-protected resources --
-disk space, CPU time, process table slots, etc. It's usually
-impossible to write bug-free kernel code or design bug-free hardware; if the
-writers of malicious user code are aware of kernel or hardware bugs,
-they will exploit them. Even in mature, widely-used kernels, such as
-Linux, people discover new vulnerabilities
-continuously~\cite{mitre:cves}. It's worthwhile to design safeguards into the
-kernel against the possibility that it has bugs: assertions, type
-checking, stack guard pages, etc. Finally, the distinction between
-user and kernel code is sometimes blurred: some privileged user-level
-processes may provide essential services and effectively be part of
-the operating system, and in some operating systems privileged user
-code can insert new code into the kernel (as with Linux's loadable
-kernel modules).
-
-
-%% 
-\section{Real world}
-%% 
-
-Most operating systems have adopted the process concept, and most
-processes look similar to xv6's.  Modern operating systems, however,
-support several threads within a process, to allow a single process to
-exploit multiple CPUs.  Supporting multiple threads in a
-process involves quite a bit of machinery that xv6 doesn't have,
-often including interface changes (e.g., Linux's
-\lstinline{clone},
-a variant of
-\lstinline{fork}),
-to control which aspects of
-a process threads share.
-%% 
-\section{Exercises}
-%%
-
-\begin{enumerate}
-
-\item Add a system call to xv6
-  that returns the amount of free memory available.
-
-% break *0x3ffffff000
-% disas 0x3ffffff000,+8
-% set disassemble-next-line auto
-% x/i $pc
-% break *0x3ffffff10e
-% print/x $sepc
-% print/x $pc
-
-\end{enumerate}
+ Capítulo  1
+ Interfaces  do  sistema  operacional
+ A  função  de  um  sistema  operacional  é  compartilhar  um  computador  entre  vários  programas  e  fornecer  um  conjunto  de  serviços  
+mais  útil  do  que  o  hardware  suporta  sozinho.  Um  sistema  operacional  gerencia  e  abstrai  o  hardware  de  baixo  nível,  de  modo  que,  
+por  exemplo,  um  processador  de  texto  não  precise  se  preocupar  com  o  tipo  de  hardware  de  disco  que  está  sendo  usado.  Um  
+sistema  operacional  compartilha  o  hardware  entre  vários  programas  para  que  eles  sejam  executados  (ou  pareçam  ser  executados)  
+ao  mesmo  tempo.  Por  fim,  os  sistemas  operacionais  fornecem  maneiras  controladas  para  os  programas  interagirem,  para  que  
+possam  compartilhar  dados  ou  trabalhar  em  conjunto.
+ Um  sistema  operacional  fornece  serviços  aos  programas  do  usuário  por  meio  de  uma  interface.  Projetar  uma  boa  interface  
+acaba  sendo  difícil.  Por  um  lado,  gostaríamos  que  a  interface  fosse  simples  e  concisa,  pois  isso  facilita  a  implementação  correta.  
+Por  outro  lado,  podemos  ser  tentados  a  oferecer  muitos  recursos  sofisticados  aos  aplicativos.  O  segredo  para  resolver  essa  
+tensão  é  projetar  interfaces  que  dependam  de  alguns  mecanismos  que  possam  ser  combinados  para  fornecer  muita  generalidade.
+ Este  livro  utiliza  um  único  sistema  operacional  como  exemplo  concreto  para  ilustrar  conceitos  de  sistema  operacional.  Esse  
+sistema  operacional,  o  xv6,  fornece  as  interfaces  básicas  introduzidas  pelo  sistema  operacional  Unix  de  Ken  Thompson  e  Dennis  
+Ritchie  [17],  além  de  imitar  o  design  interno  do  Unix.
+ O  Unix  oferece  uma  interface  estreita  cujos  mecanismos  se  combinam  bem,  oferecendo  um  grau  surpreendente  de  generalidade.  
+Essa  interface  tem  sido  tão  bem-sucedida  que  os  sistemas  operacionais  modernos  —  BSD,  Linux,  macOS,  Solaris  e  até  mesmo,  
+em  menor  grau,  o  Microsoft  Windows  —  possuem  interfaces  semelhantes  às  do  Unix.  Entender  o  xv6  é  um  bom  começo  para  
+entender  qualquer  um  desses  sistemas  e  muitos  outros.
+ Como  mostra  a  Figura  1.1,  o  xv6  assume  a  forma  tradicional  de  um  kernel,  um  programa  especial  que  fornece  serviços  aos  
+programas  em  execução.  Cada  programa  em  execução,  chamado  de  processo,  possui  memória  contendo  instruções,  dados  e  
+uma  pilha.  As  instruções  implementam  a  computação  do  programa.  Os  dados  são  as  variáveis  sobre  as  quais  a  computação  atua.  
+A  pilha  organiza  as  chamadas  de  procedimento  do  programa.
+ Um  determinado  computador  normalmente  tem  muitos  processos,  mas  apenas  um  único  kernel.
+ Quando  um  processo  precisa  invocar  um  serviço  do  kernel,  ele  invoca  uma  chamada  de  sistema,  uma  das  chamadas  na  
+interface  do  sistema  operacional.  A  chamada  de  sistema  entra  no  kernel;  o  kernel  executa  o  serviço  e  retorna.  Assim,  um  processo  
+alterna  entre  a  execução  no  espaço  do  usuário  e  no  espaço  do  kernel.
+ Conforme  descrito  em  detalhes  nos  capítulos  subsequentes,  o  kernel  usa  os  mecanismos  de  proteção  de  hardware  
+fornecidos  por  uma  CPU1  para  garantir  que  cada  processo  em  execução  no  espaço  do  usuário  possa  acessar  apenas
+ 1Este  texto  geralmente  se  refere  ao  elemento  de  hardware  que  executa  uma  computação  com  o  termo  CPU,  uma  sigla
+ 9
+Machine Translated by Google
+ usuário
+ espaço
+ núcleo
+ espaço
+ concha
+ gato
+ chamada  de  
+sistema
+ Núcleo
+ Figura  1.1:  Um  kernel  e  dois  processos  de  usuário.
+ sua  própria  memória.  O  kernel  executa  com  os  privilégios  de  hardware  necessários  para  implementar  essas  proteções;  os  programas  do  
+usuário  são  executados  sem  esses  privilégios.  Quando  um  programa  do  usuário  invoca  uma  chamada  de  sistema,  o  hardware  aumenta  
+o  nível  de  privilégio  e  começa  a  executar  uma  função  pré-definida  no  kernel.
+ O  conjunto  de  chamadas  de  sistema  que  um  kernel  fornece  é  a  interface  que  os  programas  do  usuário  veem.  O  kernel  xv6  fornece  
+um  subconjunto  dos  serviços  e  chamadas  de  sistema  que  os  kernels  Unix  tradicionalmente  oferecem.
+ A  Figura  1.2  lista  todas  as  chamadas  de  sistema  do  xv6.
+ O  restante  deste  capítulo  descreve  os  serviços  do  xv6  —  processos,  memória,  descritores  de  arquivo,  pipes  e  um  sistema  de  
+arquivos  —  e  os  ilustra  com  trechos  de  código  e  discussões  sobre  como  o  shell,  a  interface  de  linha  de  comando  do  Unix,  os  utiliza.  O  
+uso  de  chamadas  de  sistema  pelo  shell  ilustra  o  cuidado  com  que  foram  projetados.
+ O  shell  é  um  programa  comum  que  lê  comandos  do  usuário  e  os  executa.  O  fato  de  o  shell  ser  um  programa  do  usuário,  e  não  parte  do  kernel,  ilustra  o  poder  da  
+interface  de  chamada  de  sistema:  não  há  nada  de  especial  no  shell.  Isso  também  significa  que  o  shell  é  fácil  de  substituir;  como  resultado,  os  sistemas  Unix  modernos  
+têm  uma  variedade  de  shells  para  escolher,  cada  um  com  sua  própria  interface  de  usuário  e  recursos  de  script.  O  shell  xv6  é  uma  implementação  simples  da  essência  do  
+shell  Bourne  do  Unix.  Sua  implementação  pode  ser  encontrada  em  (user/sh.c:1).
+ 1.1  Processos  e  memória
+ Um  processo  xv6  consiste  em  memória  de  espaço  do  usuário  (instruções,  dados  e  pilha)  e  estado  por  processo,  privado  do  kernel.  O  Xv6  
+compartilha  o  tempo  dos  processos:  ele  alterna  de  forma  transparente  as  CPUs  disponíveis  entre  o  conjunto  de  processos  aguardando  
+execução.  Quando  um  processo  não  está  em  execução,  o  xv6  salva  os  registradores  de  CPU  do  processo,  restaurando-os  na  próxima  
+execução.  O  kernel  associa  um  identificador  de  processo,  ou  PID,  a  cada  processo.
+ Um  processo  pode  criar  um  novo  processo  usando  a  chamada  de  sistema  fork .  Fork  fornece  ao  novo  processo  uma  cópia  exata  da  
+memória  do  processo  que  fez  a  chamada,  tanto  instruções  quanto  dados.  Fork  retorna  tanto  no  processo  original  quanto  no  novo.  No  
+processo  original,  fork  retorna  o  PID  do  novo  processo.  No  novo  processo,  fork  retorna  zero.  Os  processos  original  e  novo  são  
+frequentemente  chamados  de  pai  e  filho.
+ para  unidade  central  de  processamento.  Outra  documentação  (por  exemplo,  a  especificação  RISC-V)  também  utiliza  as  palavras  processador,  
+núcleo  e  hart  em  vez  de  CPU.
+ 10
+Machine Translated by Google
+ Chamada  de  sistema
+ int  fork()  int  
+exit(int  status)  int  
+wait(int  *status)  int  kill(int  
+pid)  int  getpid()  int  
+sleep(int  n)  int  
+exec(char  *file,  char  
+Descrição
+ Crie  um  processo  e  retorne  o  PID  do  filho.
+ Encerra  o  processo  atual;  status  reportado  para  wait().  Sem  retorno.
+ Aguarde  a  saída  de  uma  criança;  saia  do  status  em  *status;  retorna  o  PID  da  criança.
+ Encerra  o  PID  do  processo.  Retorna  0  ou  -1  em  caso  de  erro.
+ Retorna  o  PID  do  processo  atual.
+ Pausa  por  n  tiques  de  relógio.
+ *argv[])  Carrega  um  arquivo  e  o  executa  com  argumentos;  retorna  somente  se  houver  erro.
+ char  *sbrk(int  n)  int  
+open(char  *file,  int  flags)  int  write(int  
+fd,  char  *buf,  int  n)  Grava  n  bytes  de  buf  no  descritor  de  arquivo  fd;  retorna  n.
+ Aumenta  a  memória  do  processo  em  n  bytes.  Retorna  o  início  da  nova  memória.
+ Abre  um  arquivo;  sinalizadores  indicam  leitura/gravação;  retorna  um  fd  (descritor  de  arquivo).
+ int  read(int  fd,  char  *buf,  int  n)  Lê  n  bytes  em  buf;  retorna  o  número  lido;  ou  0  se  for  o  fim  do  arquivo.
+ int  fechar(int  fd)
+ Libere  o  arquivo  aberto  fd.
+ int  dup(int  fd)
+ int  pipe(int  p[])
+ int  chdir(char  *dir)
+ int  mkdir(char  *dir)
+ int  mknod(char  *arquivo,  int,  int)
+ int  fstat(int  fd,  struct  stat  *st)
+ Retorna  um  novo  descritor  de  arquivo  referindo-se  ao  mesmo  arquivo  que  fd.
+ Crie  um  pipe,  coloque  descritores  de  arquivo  de  leitura/gravação  em  p[0]  e  p[1].
+ Altera  o  diretório  atual.
+ Crie  um  novo  diretório.
+ Crie  um  arquivo  de  dispositivo.
+ Coloque  informações  sobre  um  arquivo  aberto  em  *st.
+ int  stat(char  *file,  struct  stat  *st)  Coloque  informações  sobre  um  arquivo  nomeado  em  *st.
+ int  link(char  *file1,  char  *file2)  Cria  outro  nome  (file2)  para  o  arquivo  file1.
+ int  unlink(char  *arquivo)
+ Remover  um  arquivo.
+ Figura  1.2:  Chamadas  de  sistema  Xv6.  Se  não  indicado  de  outra  forma,  essas  chamadas  retornam  0  para  nenhum  erro  e  -1  se
+ há  um  erro.
+ Por  exemplo,  considere  o  seguinte  fragmento  de  programa  escrito  na  linguagem  de  programação  C  [7]:
+ int  pid  =  garfo();
+ se(pid  >  0){
+ printf("pai:  filho=%d\n",  pid);
+ pid  =  esperar((int  *)  0);
+ printf("criança  %d  terminou\n",  pid);
+ }  senão  se(pid  ==  0){
+ printf("filho:  saindo\n");
+ saída(0);
+ }  outro  {
+ printf("erro  de  bifurcação\n");
+ }
+ A  chamada  de  sistema  exit  faz  com  que  o  processo  de  chamada  pare  de  executar  e  libere  recursos  como
+ memória  e  arquivos  abertos.  Exit  recebe  um  argumento  de  status  inteiro,  convencionalmente  0  para  indicar  sucesso
+ e  1  para  indicar  falha.  A  chamada  de  sistema  wait  retorna  o  PID  de  um  filho  saído  (ou  eliminado)  de
+ 11
+Machine Translated by Google
+ o  processo  atual  e  copia  o  status  de  saída  do  filho  para  o  endereço  passado  para  wait;  se  nenhum  dos  filhos  do  chamador  
+tiver  saído,  wait  aguarda  que  um  o  faça.  Se  o  chamador  não  tiver  filhos,  wait  retorna  imediatamente  -1.  Se  o  pai  não  se  
+importar  com  o  status  de  saída  de  um  filho,  ele  pode  passar  um  endereço  0  para  wait.
+ No  exemplo,  as  linhas  de  saída
+ pai:  filho=1234  filho:  saindo
+ pode  sair  em  qualquer  ordem  (ou  até  mesmo  misturados),  dependendo  se  o  pai  ou  o  filho  chega  primeiro  à  sua  
+chamada  printf .  Após  a  saída  do  filho,  a  espera  do  pai  retorna,  fazendo  com  que  o  pai  imprima
+ pai:  filho  1234  está  pronto
+ Embora  o  processo  filho  tenha  inicialmente  o  mesmo  conteúdo  de  memória  que  o  processo  pai,  ambos  estão  
+executando  com  memória  e  registradores  separados:  alterar  uma  variável  em  um  não  afeta  o  outro.  Por  exemplo,  
+quando  o  valor  de  retorno  de  wait  é  armazenado  em  pid  no  processo  pai,  isso  não  altera  a  variável  pid  no  processo  
+filho.  O  valor  de  pid  no  processo  filho  ainda  será  zero.
+ A  chamada  de  sistema  exec  substitui  a  memória  do  processo  que  fez  a  chamada  por  uma  nova  imagem  de  
+memória  carregada  de  um  arquivo  armazenado  no  sistema  de  arquivos.  O  arquivo  deve  ter  um  formato  específico,  
+que  especifica  qual  parte  do  arquivo  contém  instruções,  qual  parte  são  dados,  em  qual  instrução  iniciar,  etc.  O  Xv6  
+usa  o  formato  ELF,  que  o  Capítulo  3  discute  em  mais  detalhes.  Normalmente,  o  arquivo  é  o  resultado  da  compilação  
+do  código-fonte  de  um  programa.  Quando  exec  é  bem-sucedido,  ele  não  retorna  ao  programa  que  fez  a  chamada;  
+em  vez  disso,  as  instruções  carregadas  do  arquivo  começam  a  ser  executadas  no  ponto  de  entrada  declarado  no  
+cabeçalho  ELF.  exec  recebe  dois  argumentos:  o  nome  do  arquivo  que  contém  o  executável  e  uma  matriz  de  
+argumentos  de  string.  Por  exemplo:
+ char  *argv[3];
+ argv[0]  =  "eco";  argv[1]  =  
+"olá";  argv[2]  =  0;  exec("/bin/
+ eco",  argv);  
+printf("erro  de  execução\n");
+ Este  fragmento  substitui  o  programa  chamador  por  uma  instância  do  programa /bin/echo  em  execução  com  a  lista  
+de  argumentos  echo  hello.  A  maioria  dos  programas  ignora  o  primeiro  elemento  da  matriz  de  argumentos,  que  é  
+convencionalmente  o  nome  do  programa.
+ O  shell  xv6  usa  as  chamadas  acima  para  executar  programas  em  nome  dos  usuários.  A  estrutura  principal  do  
+shell  é  simples;  veja  main  (user/sh.c:146).  O  loop  principal  lê  uma  linha  de  entrada  do  usuário  com  getcmd.  Em  
+seguida,  chama  fork,  que  cria  uma  cópia  do  processo  do  shell.  O  processo  pai  chama  wait,  enquanto  o  processo  
+filho  executa  o  comando.  Por  exemplo,  se  o  usuário  tivesse  digitado  "echo  hello"  no  shell,  runcmd  teria  sido  
+chamado  com  "echo  hello"  como  argumento.  runcmd  (user/sh.c:55)  executa  o  comando  real.  Para  "echo  hello",  ele  
+chamaria  exec  (user/sh.c:79).  Se  exec  for  bem-sucedido,  o  filho  executará  instruções  de  echo  em  vez  de  runcmd.  
+Em  algum  momento,  echo  chamará  exit,  o  que  fará  com  que  o  pai  retorne  de  wait  em  main  (user/sh.c:146).
+ 12
+Machine Translated by Google
+ Você  pode  se  perguntar  por  que  fork  e  exec  não  são  combinados  em  uma  única  chamada;  veremos  mais  
+adiante  que  o  shell  explora  essa  separação  em  sua  implementação  de  redirecionamento  de  E/S.  Para  evitar  o  
+desperdício  de  criar  um  processo  duplicado  e  substituí-lo  imediatamente  (por  exec),  os  kernels  operacionais  
+otimizam  a  implementação  de  fork  para  esse  caso  de  uso  usando  técnicas  de  memória  virtual,  como  cópia  na  
+gravação  (consulte  a  Seção  4.6).
+ O  Xv6  aloca  a  maior  parte  da  memória  do  espaço  do  usuário  implicitamente:  fork  aloca  a  memória  necessária  
+para  a  cópia  filha  da  memória  do  pai,  e  exec  aloca  memória  suficiente  para  armazenar  o  arquivo  executável.  Um  
+processo  que  precisa  de  mais  memória  em  tempo  de  execução  (talvez  para  malloc)  pode  chamar  sbrk(n)  para  
+aumentar  sua  memória  de  dados  em  n  bytes;  sbrk  retorna  a  localização  da  nova  memória.
+ 1.2  E/S  e  descritores  de  arquivo
+ Um  descritor  de  arquivo  é  um  pequeno  inteiro  que  representa  um  objeto  gerenciado  pelo  kernel  do  qual  um  
+processo  pode  ler  ou  gravar.  Um  processo  pode  obter  um  descritor  de  arquivo  abrindo  um  arquivo,  diretório  ou  
+dispositivo,  criando  um  pipe  ou  duplicando  um  descritor  existente.  Para  simplificar,  frequentemente  nos  referimos  
+ao  objeto  ao  qual  um  descritor  de  arquivo  se  refere  como  "arquivo";  a  interface  do  descritor  de  arquivo  abstrai  
+as  diferenças  entre  arquivos,  pipes  e  dispositivos,  fazendo  com  que  todos  pareçam  fluxos  de  bytes.  Nos  
+referiremos  à  entrada  e  à  saída  como  E/S.
+ Internamente,  o  kernel  xv6  usa  o  descritor  de  arquivo  como  um  índice  em  uma  tabela  por  processo,  de  
+modo  que  cada  processo  tenha  um  espaço  privado  de  descritores  de  arquivo  começando  em  zero.  Por  
+convenção,  um  processo  lê  do  descritor  de  arquivo  0  (entrada  padrão),  grava  a  saída  no  descritor  de  arquivo  1  
+(saída  padrão)  e  grava  mensagens  de  erro  no  descritor  de  arquivo  2  (erro  padrão).  Como  veremos,  o  shell  
+explora  a  convenção  para  implementar  redirecionamentos  de  E/S  e  pipelines.  O  shell  garante  que  sempre  tenha  
+três  descritores  de  arquivo  abertos  (user/sh.c:152).  que  são,  por  padrão,  descritores  de  arquivo  para  o  console.
+ O  sistema  de  leitura  e  gravação  chama  bytes  de  leitura  e  bytes  de  gravação  para  abrir  arquivos  nomeados  por  
+descritores  de  arquivo.  A  chamada  read(fd,  buf,  n)  lê  no  máximo  n  bytes  do  descritor  de  arquivo  fd,  copia-os  para  buf  e  
+retorna  o  número  de  bytes  lidos.  Cada  descritor  de  arquivo  que  se  refere  a  um  arquivo  possui  um  deslocamento  associado.  
+read  lê  os  dados  do  deslocamento  do  arquivo  atual  e,  em  seguida,  avança  esse  deslocamento  pelo  número  de  bytes  lidos:  
+uma  leitura  subsequente  retornará  os  bytes  seguintes  aos  retornados  pela  primeira  leitura.  Quando  não  há  mais  bytes  
+para  ler,  read  retorna  zero  para  indicar  o  fim  do  arquivo.
+ A  chamada  write(fd,  buf,  n)  grava  n  bytes  de  buf  no  descritor  de  arquivo  fd  e  retorna  o  número  de  bytes  gravados.  
+Menos  de  n  bytes  são  gravados  somente  quando  ocorre  um  erro.  Assim  como  read,  write  grava  dados  no  deslocamento  
+do  arquivo  atual  e,  em  seguida,  avança  esse  deslocamento  pelo  número  de  bytes  gravados:  cada  gravação  continua  de  
+onde  a  anterior  parou.
+ O  seguinte  fragmento  de  programa  (que  constitui  a  essência  do  programa  cat)  copia  dados  de  sua  entrada  
+padrão  para  sua  saída  padrão.  Se  ocorrer  um  erro,  ele  grava  uma  mensagem  na  entrada  padrão.
+ erro.
+ char  buf[512];  int  n;
+ para(;;){
+ 13
+Machine Translated by Google
+ n  =  ler(0,  buf,  tamanho  de  buf);  se(n  ==  0)  quebrar;  
+se(n  <  0)
+ { fprintf(2,  
+"erro  de  
+leitura\n");  sair(1);
+ }  se(escrever(1,  buf,  n) !=  n){
+ fprintf(2,  "erro  de  gravação\n");  exit(1);
+ }
+ }
+ O  importante  a  ser  observado  no  fragmento  de  código  é  que  cat  não  sabe  se  está  lendo  de  um  arquivo,  console  ou  pipe.  Da  
+mesma  forma,  cat  não  sabe  se  está  imprimindo  para  um  console,  um  arquivo  ou  qualquer  outro  lugar.  O  uso  de  descritores  
+de  arquivo  e  a  convenção  de  que  o  descritor  de  arquivo  0  é  a  entrada  e  o  descritor  de  arquivo  1  é  a  saída  permitem  uma  
+implementação  simples  de  cat.
+ A  chamada  de  sistema  close  libera  um  descritor  de  arquivo,  tornando-o  livre  para  reutilização  em  futuras  chamadas  de  
+sistema  open,  pipe  ou  dup  (veja  abaixo).  Um  descritor  de  arquivo  recém-alocado  é  sempre  o  descritor  não  utilizado  de  
+menor  numeração  do  processo  atual.
+ Descritores  de  arquivo  e  fork  interagem  para  facilitar  a  implementação  do  redirecionamento  de  E/S.  O  fork  copia  a  tabela  
+de  descritores  de  arquivo  do  processo  pai  juntamente  com  sua  memória,  de  modo  que  o  processo  filho  comece  com  exatamente  
+os  mesmos  arquivos  abertos  que  o  processo  pai.  A  chamada  de  sistema  exec  substitui  a  memória  do  processo  que  fez  a  
+chamada,  mas  preserva  sua  tabela  de  arquivos.  Esse  comportamento  permite  que  o  shell  implemente  o  redirecionamento  de  E/
+ S  por  meio  de  fork,  reabrindo  os  descritores  de  arquivo  escolhidos  no  processo  filho  e,  em  seguida,  chamando  exec  para  
+executar  o  novo  programa.  Aqui  está  uma  versão  simplificada  do  código  que  um  shell  executa  para  o  comando  cat  <  input.txt:
+ char  *argv[2];
+ argv[0]  =  "gato";  argv[1]  =  
+0;  if(fork()  ==  0)  
+{ fechar(0);  abrir("input.txt",  
+O_RDONLY);  
+exec("gato",  argv);
+ }
+ Após  o  processo  filho  fechar  o  descritor  de  arquivo  0,  open  garante  que  usará  esse  descritor  de  arquivo  para  o  
+arquivo  input.txt  recém-aberto:  0  será  o  menor  descritor  de  arquivo  disponível.  cat  então  executa  com  o  descritor  de  
+arquivo  0  (entrada  padrão)  referindo-se  ao  arquivo  input.txt.  Os  descritores  de  arquivo  do  processo  pai  não  são  
+alterados  por  esta  sequência,  pois  ela  modifica  apenas  os  descritores  do  processo  filho.
+ O  código  para  redirecionamento  de  E/S  no  shell  xv6  funciona  exatamente  dessa  maneira  (user/sh.c:83).  Lembre-se  de  
+que  neste  ponto  do  código  o  shell  já  bifurcou  o  shell  filho  e  que  runcmd  chamará  exec  para  carregar  o  novo  programa.
+ O  segundo  argumento  para  open  consiste  em  um  conjunto  de  sinalizadores,  expressos  como  bits,  que  controlam  
+o  que  open  faz.  Os  valores  possíveis  são  definidos  no  cabeçalho  de  controle  de  arquivo  (fcntl)  (kernel/fcntl.h:1-5):
+ 14
+Machine Translated by Google
+ O_RDONLY,  O_WRONLY,  O_RDWR,  O_CREATE  e  O_TRUNC,  que  instruem  open  a  abrir  o  arquivo  para  leitura,  ou  para  
+gravação,  ou  para  leitura  e  gravação,  para  criar  o  arquivo  se  ele  não  existir  e  para  truncá-lo  para  comprimento  zero.
+ Agora  deve  ficar  claro  por  que  é  útil  que  fork  e  exec  sejam  chamadas  separadas:  entre  as  duas,  o  shell  tem  a  chance  de  
+redirecionar  a  E/S  do  shell  filho  sem  perturbar  a  configuração  de  E/S  do  shell  principal.  Pode-se,  em  vez  disso,  imaginar  uma  
+hipotética  chamada  de  sistema  combinada  forkexec ,  mas  as  opções  para  realizar  o  redirecionamento  de  E/S  com  tal  
+chamada  parecem  estranhas.  O  shell  poderia  modificar  sua  própria  configuração  de  E/S  antes  de  chamar  forkexec  (e  então  
+desfazer  essas  modificações);  ou  forkexec  poderia  receber  instruções  de  redirecionamento  de  E/S  como  argumentos;  ou  (o  
+que  é  menos  atraente)  todo  programa,  como  cat,  poderia  ser  ensinado  a  fazer  seu  próprio  redirecionamento  de  E/S.
+ Embora  o  fork  copie  a  tabela  do  descritor  de  arquivo,  cada  deslocamento  de  arquivo  subjacente  é  compartilhado  entre
+ Pais  e  filhos.  Considere  este  exemplo:
+ if(fork()  ==  0)  { write(1,  "olá  
+",  6);  exit(0); }  else  { wait(0);  write(1,  
+"mundo\n",  
+6);
+ }
+ No  final  deste  fragmento,  o  arquivo  anexado  ao  descritor  de  arquivo  1  conterá  os  dados  hello  world.
+ A  gravação  no  pai  (que,  graças  à  espera,  só  é  executada  após  a  conclusão  do  filho)  continua  de  onde  a  gravação  do  filho  
+parou.  Esse  comportamento  ajuda  a  produzir  uma  saída  sequencial  a  partir  de  sequências  de  comandos  de  shell,  como  (echo  
+hello;  echo  world)  >output.txt.
+ A  chamada  de  sistema  dup  duplica  um  descritor  de  arquivo  existente,  retornando  um  novo  que  se  refere  ao  mesmo  
+objeto  de  E/S  subjacente.  Ambos  os  descritores  de  arquivo  compartilham  um  deslocamento,  assim  como  os  descritores  de  
+arquivo  duplicados  por  fork .  Esta  é  outra  maneira  de  escrever  hello  world  em  um  arquivo:
+ fd  =  dup(1);  
+escrever(1,  "olá  ",  6);  escrever(fd,  
+"mundo\n",  6);
+ Dois  descritores  de  arquivo  compartilham  um  deslocamento  se  forem  derivados  do  mesmo  descritor  de  arquivo  original  
+por  uma  sequência  de  chamadas  fork  e  dup .  Caso  contrário,  os  descritores  de  arquivo  não  compartilham  deslocamentos,  
+mesmo  que  tenham  resultado  de  chamadas  open  para  o  mesmo  arquivo.  O  dup  permite  que  shells  implementem  comandos  
+como  este:  ls  existing-file  non-existing-file  >  tmp1  2>&1.  O  2>&1  informa  ao  shell  para  atribuir  ao  comando  um  descritor  de  
+arquivo  2,  que  é  uma  duplicata  do  descritor  1.  Tanto  o  nome  do  arquivo  existente  quanto  a  mensagem  de  erro  para  o  arquivo  
+inexistente  serão  exibidos  no  arquivo  tmp1.  O  shell  xv6  não  suporta  redirecionamento  de  E/S  para  o  descritor  de  arquivo  de  
+erro,  mas  agora  você  sabe  como  implementá-lo.
+ Os  descritores  de  arquivo  são  uma  abstração  poderosa,  porque  eles  escondem  os  detalhes  do  que  estão  conectados:  
+um  processo  escrevendo  no  descritor  de  arquivo  1  pode  estar  escrevendo  em  um  arquivo,  em  um  dispositivo  como  o  console  
+ou  em  um  pipe.
+ 15
+Machine Translated by Google
+ 1.3  Tubos
+ Um  pipe  é  um  pequeno  buffer  de  kernel  exposto  aos  processos  como  um  par  de  descritores  de  arquivo,  um  para  leitura  e  
+outro  para  escrita.  A  gravação  de  dados  em  uma  extremidade  do  pipe  torna  esses  dados  disponíveis  para  leitura  na  outra  
+extremidade.  Pipes  fornecem  uma  maneira  para  os  processos  se  comunicarem.
+ O  código  de  exemplo  a  seguir  executa  o  programa  wc  com  a  entrada  padrão  conectada  à  extremidade  de  leitura  de  um  
+pipe.
+ int  p[2];  char  
+*argv[2];
+ argv[0]  =  "wc";  argv[1]  =  
+0;
+ pipe(p);  
+if(fork()  ==  0)  { fechar(0);  
+dup(p[0]);  
+fechar(p[0]);  
+fechar(p[1]);  exec("/
+ bin/wc",  argv); }  else  
+{ fechar(p[0]);  escrever(p[1],  "olá  
+mundo\n",  
+12);  fechar(p[1]);
+ }
+ O  programa  chama  pipe,  que  cria  um  novo  pipe  e  registra  os  descritores  de  arquivo  de  leitura  e  gravação  no  array  p.  Após  a  
+bifurcação,  tanto  o  pai  quanto  o  filho  possuem  descritores  de  arquivo  referentes  ao  pipe.  O  filho  chama  close  e  dup  para  fazer  
+com  que  o  descritor  de  arquivo  zero  se  refira  à  extremidade  de  leitura  do  pipe,  fecha  os  descritores  de  arquivo  em  p  e  chama  
+exec  para  executar  wc.  Quando  wc  lê  de  sua  entrada  padrão,  ele  lê  do  pipe.  O  pai  fecha  o  lado  de  leitura  do  pipe,  escreve  no  
+pipe  e,  em  seguida,  fecha  o  lado  de  gravação.
+ Se  não  houver  dados  disponíveis,  uma  leitura  em  um  pipe  aguarda  que  os  dados  sejam  gravados  ou  que  todos  os  
+descritores  de  arquivo  referentes  à  extremidade  de  gravação  sejam  fechados;  neste  último  caso,  a  leitura  retornará  0,  como  
+se  o  fim  de  um  arquivo  de  dados  tivesse  sido  alcançado.  O  fato  de  a  leitura  bloquear  até  que  seja  impossível  a  chegada  de  
+novos  dados  é  um  dos  motivos  pelos  quais  é  importante  que  o  filho  feche  a  extremidade  de  gravação  do  pipe  antes  de  
+executar  o  comando  wc  acima:  se  um  dos  descritores  de  arquivo  de  wc  se  referisse  à  extremidade  de  gravação  do  pipe,  wc  
+nunca  veria  o  fim  do  arquivo.
+ O  shell  xv6  implementa  pipelines  como  grep  fork  sh.c  |  wc  -l  de  maneira  semelhante  ao  código  acima  (usuário/sh.c:101).  
+O  processo  filho  cria  um  pipe  para  conectar  a  extremidade  esquerda  do  pipeline  com  a  extremidade  direita.  Em  seguida,  ele  
+chama  fork  e  runcmd  para  a  extremidade  esquerda  do  pipeline  e  fork  e  runcmd  para  a  extremidade  direita,  e  aguarda  a  
+conclusão  de  ambos.  A  extremidade  direita  do  pipeline  pode  ser  um  comando  que  inclui  um  pipe  (por  exemplo,  a  |  b  |  c),  que  
+bifurca  dois  novos  processos  filhos  (um  para  b  e  outro  para  c).  Assim,  o  shell  pode  criar  uma  árvore  de  processos.  As  folhas
+ 16
+Machine Translated by Google
+ dessa  árvore  são  comandos  e  os  nós  internos  são  processos  que  esperam  até  que  os  filhos  esquerdo  e  direito  sejam  concluídos.
+ Os  pipes  podem  não  parecer  mais  poderosos  do  que  os  arquivos  temporários:  o  pipeline
+ eco  olá  mundo  |  wc
+ poderia  ser  implementado  sem  tubos  como
+ eco  olá  mundo  >/tmp/xyz;  wc  </tmp/xyz
+ Pipes  têm  pelo  menos  três  vantagens  sobre  arquivos  temporários  nessa  situação.  Primeiro,  pipes  se  autolimpam;  com  o  
+redirecionamento  de  arquivos,  um  shell  teria  que  ter  o  cuidado  de  remover /tmp/xyz  ao  terminar.  Segundo,  pipes  podem  passar  
+fluxos  de  dados  arbitrariamente  longos,  enquanto  o  redirecionamento  de  arquivos  requer  espaço  livre  suficiente  em  disco  para  
+armazenar  todos  os  dados.  Terceiro,  pipes  permitem  a  execução  paralela  de  etapas  do  pipeline,  enquanto  a  abordagem  de  
+arquivo  exige  que  o  primeiro  programa  termine  antes  do  segundo  iniciar.
+ 1.4  Sistema  de  arquivos
+ O  sistema  de  arquivos  xv6  fornece  arquivos  de  dados,  que  contêm  matrizes  de  bytes  não  interpretadas,  e  diretórios,  que  contêm  
+referências  nomeadas  a  arquivos  de  dados  e  outros  diretórios.  Os  diretórios  formam  uma  árvore,  começando  em  um  diretório  
+especial  chamado  raiz.  Um  caminho  como /a/b/c  refere-se  ao  arquivo  ou  diretório  chamado  c  dentro  do  diretório  chamado  b  
+dentro  do  diretório  chamado  a  no  diretório  raiz /.  Caminhos  que  não  começam  com /  são  avaliados  em  relação  ao  diretório  atual  
+do  processo  chamador,  que  pode  ser  alterado  com  a  chamada  de  sistema  chdir .  Ambos  os  fragmentos  de  código  abrem  o  mesmo  
+arquivo  (assumindo  que  todos  os  diretórios  envolvidos  existam):
+ chdir("/a");  chdir("b");  
+open("c",  
+O_RDONLY);
+ aberto("/a/b/c",  O_RDONLY);
+ O  primeiro  fragmento  altera  o  diretório  atual  do  processo  para /a/b;  o  segundo  não  faz  referência  nem  altera  o  diretório  atual  do  
+processo.
+ Existem  chamadas  de  sistema  para  criar  novos  arquivos  e  diretórios:  mkdir  cria  um  novo  diretório,  open  com  o  
+sinalizador  O_CREATE  cria  um  novo  arquivo  de  dados  e  mknod  cria  um  novo  arquivo  de  dispositivo.  Este  exemplo  
+ilustra  todos  os  três:
+ mkdir("/dir");  fd  =  open("/
+ dir/arquivo",  O_CREATE|O_WRONLY);  close(fd);  mknod("/console",  1,  
+1);
+ O  mknod  cria  um  arquivo  especial  que  se  refere  a  um  dispositivo.  Associados  a  um  arquivo  de  dispositivo  estão  os  números  de  
+dispositivo  principal  e  secundário  (os  dois  argumentos  do  mknod),  que  identificam  exclusivamente  um  dispositivo  do  kernel.
+ Quando  um  processo  abre  posteriormente  um  arquivo  de  dispositivo,  o  kernel  desvia  chamadas  de  leitura  e  gravação  do  sistema  
+para  a  implementação  do  dispositivo  do  kernel  em  vez  de  passá-las  para  o  sistema  de  arquivos.
+ 17
+Machine Translated by Google
+ O  nome  de  um  arquivo  é  diferente  do  próprio  arquivo;  o  mesmo  arquivo  subjacente,  chamado  inode,  pode  ter  vários  
+nomes,  chamados  links.  Cada  link  consiste  em  uma  entrada  em  um  diretório;  a  entrada  contém  um  nome  de  arquivo  e  
+uma  referência  a  um  inode.  Um  inode  contém  metadados  sobre  um  arquivo,  incluindo  seu  tipo  (arquivo,  diretório  ou  
+dispositivo),  seu  comprimento,  a  localização  do  conteúdo  do  arquivo  no  disco  e  o  número  de  links  para  um  arquivo.
+ A  chamada  de  sistema  fstat  recupera  informações  do  inode  ao  qual  um  descritor  de  arquivo  se  refere.
+ preenche  uma  estrutura  stat,  definida  em  stat.h  (kernel/stat.h)  como:
+ #define  T_DIR
+ T_FILE  #define  
+T_DEVICE  3 //  Dispositivo
+ estrutura  stat  {
+ int  dev;
+ 1 //  Diretório
+ 2 //  Arquivo  #define  
+//  Dispositivo  de  disco  do  sistema  de  arquivos  
+//  Número  do  inode  uint  
+ino;  short  
+type; //  Tipo  de  arquivo  short  nlink; //  Número  
+de  links  para  o  arquivo  uint64  size; //  Tamanho  do  arquivo  em  
+bytes };
+ A  chamada  do  sistema  de  link  cria  outro  nome  de  sistema  de  arquivo  que  se  refere  ao  mesmo  inode  que  um  existente
+ arquivo  ing.  Este  fragmento  cria  um  novo  arquivo  chamado  a  e  b.
+ abrir("a",  O_CREATE|O_WRONLY);  link("a",  "b");
+ Ler  ou  escrever  em  a  é  o  mesmo  que  ler  ou  escrever  em  b.  Cada  inode  é  identificado  por  um  número  de  inode  exclusivo.  
+Após  a  sequência  de  código  acima,  é  possível  determinar  que  a  e  b  se  referem  ao  mesmo  conteúdo  subjacente  inspecionando  
+o  resultado  de  fstat:  ambos  retornarão  o  mesmo  número  de  inode  (ino)  e  a  contagem  de  nlinks  será  definida  como  2.
+ A  chamada  de  sistema  unlink  remove  um  nome  do  sistema  de  arquivos.  O  inode  do  arquivo  e  o  espaço  em  disco  que  
+contém  seu  conteúdo  só  são  liberados  quando  a  contagem  de  links  do  arquivo  é  zero  e  nenhum  descritor  de  arquivo  faz  
+referência  a  ele.  Adicionando  assim
+ desvincular("a");
+ para  a  última  sequência  de  código  deixa  o  inode  e  o  conteúdo  do  arquivo  acessíveis  como  b.  Além  disso,
+ fd  =  abrir("/tmp/xyz",  O_CREATE|O_RDWR);  desvincular("/tmp/
+ xyz");
+ é  uma  maneira  idiomática  de  criar  um  inode  temporário  sem  nome  que  será  limpo  quando  o  processo  fechar  o  fd  ou  sair.
+ O  Unix  fornece  utilitários  de  arquivo  que  podem  ser  chamados  a  partir  do  shell  como  programas  de  nível  de  usuário,  por  
+exemplo ,  mkdir,  ln  e  rm.  Esse  design  permite  que  qualquer  pessoa  estenda  a  interface  de  linha  de  comando  adicionando  
+novos  programas  de  nível  de  usuário.  Em  retrospectiva,  esse  plano  parece  óbvio,  mas  outros  sistemas  projetados  na  época  
+do  Unix  frequentemente  incorporavam  esses  comandos  ao  shell  (e  o  shell  ao  kernel).
+ Uma  exceção  é  o  cd,  que  é  incorporado  ao  shell  (user/sh.c:161).  cd  deve  alterar  o  diretório  de  trabalho  atual  do  próprio  
+shell.  Se  cd  fosse  executado  como  um  comando  regular,  o  shell
+ 18
+Machine Translated by Google
+ bifurcar  um  processo  filho,  o  processo  filho  executaria  cd,  e  cd  alteraria  o  diretório  de  trabalho  do  filho.  O  diretório  
+de  trabalho  do  pai  (ou  seja,  do  shell)  não  mudaria.
+ 1.5  Mundo  real
+ A  combinação  de  descritores  de  arquivo  "padrão",  pipes  e  sintaxe  shell  conveniente  do  Unix  para  operações  sobre  
+eles  foi  um  grande  avanço  na  escrita  de  programas  reutilizáveis  de  uso  geral.  A  ideia  deu  início  a  uma  cultura  de  
+"ferramentas  de  software"  que  foi  responsável  por  grande  parte  do  poder  e  popularidade  do  Unix,  e  o  shell  foi  a  
+primeira  chamada  "linguagem  de  script".  A  interface  de  chamada  de  sistema  do  Unix  persiste  até  hoje  em  sistemas  
+como  BSD,  Linux  e  macOS.
+ A  interface  de  chamada  de  sistema  do  Unix  foi  padronizada  pelo  padrão  POSIX  (Portable  Operating  System  
+Interface).  O  Xv6  não  é  compatível  com  POSIX:  faltam  muitas  chamadas  de  sistema  (incluindo  as  básicas,  como  
+lseek),  e  muitas  das  chamadas  de  sistema  que  ele  fornece  diferem  do  padrão.  Nossos  principais  objetivos  para  o  
+xv6  são  simplicidade  e  clareza,  ao  mesmo  tempo  em  que  fornecemos  uma  interface  de  chamada  de  sistema  
+simples,  semelhante  ao  UNIX.  Várias  pessoas  estenderam  o  xv6  com  algumas  chamadas  de  sistema  a  mais  e  
+uma  biblioteca  C  simples  para  executar  programas  Unix  básicos.  Os  kernels  modernos,  no  entanto,  fornecem  
+muito  mais  chamadas  de  sistema  e  muitos  mais  tipos  de  serviços  de  kernel  do  que  o  xv6.  Por  exemplo,  eles  
+oferecem  suporte  a  redes,  sistemas  de  janelas,  threads  em  nível  de  usuário,  drivers  para  muitos  dispositivos  e  
+assim  por  diante.  Os  kernels  modernos  evoluem  contínua  e  rapidamente  e  oferecem  muitos  recursos  além  do  POSIX.
+ O  Unix  unificou  o  acesso  a  múltiplos  tipos  de  recursos  (arquivos,  diretórios  e  dispositivos)  com  um  único  
+conjunto  de  interfaces  de  nome  e  descritor  de  arquivo.  Essa  ideia  pode  ser  estendida  a  mais  tipos  de  recursos;  
+um  bom  exemplo  é  o  Plan  9  [16],  que  aplicou  o  conceito  de  “recursos  são  arquivos”  a  redes,  gráficos  e  outros.  No  
+entanto,  a  maioria  dos  sistemas  operacionais  derivados  do  Unix  não  seguiu  esse  caminho.
+ O  sistema  de  arquivos  e  os  descritores  de  arquivos  têm  sido  abstrações  poderosas.  Mesmo  assim,  existem  
+outros  modelos  para  interfaces  de  sistemas  operacionais.  O  Multics,  um  predecessor  do  Unix,  abstraiu  o  
+armazenamento  de  arquivos  de  uma  forma  que  o  fez  parecer  memória,  produzindo  uma  interface  muito  diferente.  
+A  complexidade  do  design  do  Multics  teve  uma  influência  direta  nos  designers  do  Unix,  que  buscavam  construir  
+algo  mais  simples.
+ O  Xv6  não  fornece  uma  noção  de  usuários  ou  de  proteção  de  um  usuário  de  outro;  em  termos  Unix,
+ todos  os  processos  xv6  são  executados  como  root.
+ Este  livro  examina  como  o  xv6  implementa  sua  interface  semelhante  à  do  Unix,  mas  as  ideias  e  conceitos  se  
+aplicam  a  mais  do  que  apenas  o  Unix.  Qualquer  sistema  operacional  deve  multiplexar  processos  no  hardware  
+subjacente,  isolar  processos  uns  dos  outros  e  fornecer  mecanismos  para  comunicação  controlada  entre  processos.  
+Depois  de  estudar  o  xv6,  você  deverá  ser  capaz  de  analisar  outros  sistemas  operacionais  mais  complexos  e  
+entender  os  conceitos  subjacentes  ao  xv6  nesses  sistemas  também
