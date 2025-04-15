@@ -1,945 +1,328 @@
-\chapter{Locking}
-\label{CH:LOCK}
-
-Most kernels, including xv6, interleave the execution
-of multiple activities.
-One source of interleaving is multiprocessor hardware:
-computers with
-multiple CPUs executing independently, such as xv6's RISC-V.
-These multiple CPUs share physical RAM,
-and xv6 exploits the sharing to maintain
-data structures that all CPUs read and write.
-This sharing raises the possibility of
-one CPU reading a data structure while another
-CPU is mid-way through updating it, or even
-multiple CPUs updating the same data simultaneously;
-without careful design such parallel access is likely
-to yield incorrect results or a broken data structure.
-Even on a uniprocessor, the kernel may switch the CPU among
-a number of threads, causing their execution to be interleaved.
-Finally, a device interrupt handler that modifies
-the same data as some interruptible code could damage
-the data if the interrupt occurs at just the wrong time.
-The word 
-\indextext{concurrency}
-refers to situations in which
-multiple instruction streams are interleaved,
-due to multiprocessor parallelism,
-thread switching, or interrupts.
-
-Kernels are full of concurrently-accessed data. For example, two CPUs
-could simultaneously call {\tt kalloc}, thereby concurrently
-popping from the head of the free list. Kernel designers like to allow
-for lots of concurrency, since it can yield increased performance
-through parallelism, and increased responsiveness. However, as a result
-kernel designers must convince themselves of
-correctness despite such concurrency. There are many ways to arrive at
-correct code, some easier to reason about than others. Strategies
-aimed at correctness under concurrency, and abstractions that support
-them, are called \indextext{concurrency control} techniques.
-
-Xv6 uses a number of concurrency control techniques, depending on the
-situation; many more are possible. This chapter focuses on a widely
-used technique: the \indextext{lock}.  A lock provides mutual
-exclusion, ensuring that only one CPU at a time can hold the lock. If
-the programmer associates a lock with each shared data item, and the
-code always holds the associated lock when using an item, then the
-item will be used by only one CPU at a time.  In this situation, we
-say that the lock protects the data item.  Although locks are an
-easy-to-understand concurrency control mechanism, the downside of
-locks is that they can limit performance, because they serialize
-concurrent operations.
-
-The rest of this chapter explains why xv6 needs locks, how xv6
-implements them, and how it uses them.
-
-
-% The following is most relevant to lock-free code:
-% 
-% A key observation will be that if you look at some code in
-% xv6, you must ask yourself if concurrent code could change
-% the intended behavior of the code by modifying data (or hardware resources)
-% it depends on.
-% You must keep in mind that the compiler may turn a
-% single C statement into several machine instructions,
-% and that those instructions may execute in a way that is
-% interleaved with instructions executing on other CPUs.
-% That is, you cannot assume that lines of C code
-% on the page are executed atomically.
-% Concurrency makes reasoning about correctness difficult.
-
-%% 
-\section{Races}
-%% 
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.8]{fig/smp.pdf}
-\caption{Simplified SMP architecture}
-\label{fig:smp}
-\end{figure}
-
-As an example of why we need locks, consider two processes
-with exited children calling
-{\tt wait} on two different
-CPUs.  {\tt wait} frees the child's memory.
-Thus
-on each CPU, the kernel will call {\tt kfree}
-to free the children's memory pages.  The kernel allocator maintains a linked
-page of memory from a list of free pages, and \lstinline{kfree()}
-For best performance, we might hope that the {\tt kfree}s of the two parent processes
-would execute in parallel without either having to wait for the other,
-but this would not be correct given xv6's {\tt kfree} implementation.
-
-Figure~\ref{fig:smp} illustrates the setting in more detail: the
-linked list of free pages is in memory that is shared by the two CPUs, which
-manipulate the list using load and store instructions.  (In
-reality, the processors have caches, but conceptually 
-multiprocessor systems behave as if there were a single, shared memory.)
-If there were no concurrent
-requests, you might implement a list \lstinline{push} operation as
-follows:
-\begin{lstlisting}[numbers=left,firstnumber=1]
-    struct element {
-      int data;
-      struct element *next;
-    };
-    
-    struct element *list = 0;
-    
-    void
-    push(int data)
-    {
-      struct element *l;
-   
-      l = malloc(sizeof *l);
-      l->data = data;
-      l->next = list; (*@\label{line:next}@*)
-      list = l;  (*@\label{line:list}@*)
-   }
-\end{lstlisting}
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.5]{fig/race.pdf}
-\caption{Example race}
-\label{fig:race}
-\end{figure}
-This implementation is correct if executed in isolation.
-However, the code is not correct if more than one
-copy executes concurrently.
-If two CPUs execute
-\lstinline{push}
-at the same time,
-both might execute line~\ref{line:next} as shown in Fig~\ref{fig:smp},
-before either executes line~\ref{line:list},  which results
-in an incorrect outcome as illustrated by Figure~\ref{fig:race}.
-There would then be two
-list elements with
-\lstinline{next}
-set to the former value of
-\lstinline{list}.
-When the two assignments to
-\lstinline{list}
-happen at line ~\ref{line:list},
-the second one will overwrite the first;
-the element involved in the first assignment
-will be lost.
-
-The lost update at line~\ref{line:list} is an example of a
-\indextext{race}.
-A race is a situation in which a memory location is accessed
-concurrently, and at least one access is a write.
-A race is often a sign of a bug, either a lost update
-(if the accesses are writes) or a read of
-an incompletely-updated data structure.
-The outcome of a race depends on
-the machine code generated by the compiler,
-the timing of the two CPUs involved,
-and how their memory operations are ordered by the memory system,
-which can make race-induced errors difficult to reproduce
-and debug.
-For example, adding print statements while debugging
-\lstinline{push}
-might change the timing of the execution enough
-to make the race disappear.
-
-The usual way to avoid races is to use a lock.
-Locks ensure
-\indextext{mutual exclusion},
-so that only one CPU at a time can execute 
-the sensitive lines of
-\lstinline{push};
-this makes the scenario above impossible.
-The correctly locked version of the above code
-adds just a few lines (highlighted in yellow):
-\begin{lstlisting}[numbers=left,firstnumber=6]
-   struct element *list = 0;
-   (*@\hl{struct lock listlock;}@*)
-    	
-   void
-   push(int data)
-   {
-     struct element *l;
-     l = malloc(sizeof *l); (*@\label{line:malloc}@*)
-     l->data = data;
-   
-     (*@\hl{acquire(\&listlock);} @*)
-     l->next = list;     (*@\label{line:next1}@*)
-     list = l;           (*@\label{line:list1}@*)
-     (*@\hl{release(\&listlock)}; @*)
-   }
-\end{lstlisting}
-The sequence of instructions between
-\lstinline{acquire}
-and
-\lstinline{release}
-is often called a
-\indextext{critical section}.
-The lock is typically said to be protecting
-\lstinline{list}.
-
-When we say that a lock protects data, we really mean
-that the lock protects some collection of invariants
-that apply to the data.
-Invariants are properties of data structures that
-are maintained across operations.
-Typically, an operation's correct behavior depends
-on the invariants being true when the operation
-begins.  The operation may temporarily violate
-the invariants but must reestablish them before
-finishing.
-For example, in the linked list case, the invariant is that
-\lstinline{list}
-points at the first element in the list
-and that each element's
-\lstinline{next}
-field points at the next element.
-The implementation of
-\lstinline{push}
-violates this invariant temporarily: in line~\ref{line:next1},
-\lstinline{l}
-points
-to the next list element, but
-\lstinline{list}
-does not point at
-\lstinline{l}
-yet (reestablished at line~\ref{line:list1}).
-The race we examined above
-happened because a second CPU executed
-code that depended on the list invariants
-while they were (temporarily) violated.
-Proper use of a lock ensures that only one CPU at a time
-can operate on the data structure in the critical section, so that
-no CPU will execute a data structure operation when the 
-data structure's invariants do not hold.
-
-You can think of a lock as
-\indextext{serializing}
-concurrent critical sections so that they run one at a time,
-and thus preserve invariants (assuming the critical sections
-are correct in isolation).
-You can also think of critical sections guarded by the same lock as being
-atomic with respect to each other,
-so that each sees only the complete set of
-changes from earlier critical sections, and never sees
-partially-completed updates.
-
-Though useful for correctness, locks inherently
-limit performance.  For example, if two processes call {\tt kfree}
-concurrently, the locks will serialize the two critical sections,
-so that there is no
-benefit from running them on different CPUs.  We say that multiple
-processes \indextext{conflict} if they want the same lock at the same
-time, or that the lock experiences \indextext{contention}.  A major
-challenge in kernel design is avoidance of lock contention
-in pursuit of parallelism.  Xv6 does
-little of that, but sophisticated kernels organize
-data structures and algorithms specifically to avoid lock contention.  In the list
-example, a kernel may maintain a separate free list per CPU and only touch
-another CPU's free list if the current CPU's list is empty and it must steal
-memory from another CPU.  Other use cases may require more
-complicated designs.
-
-The placement of locks is also important for performance.
-For example, it would be correct to move
-\lstinline{acquire}
-earlier in
-\lstinline{push},
-before line~\ref{line:malloc}.
-But this would likely reduce performance because then the calls
-to
-\lstinline{malloc}
-would be serialized.
-The section ``Using locks'' below provides some guidelines for where to insert
-\lstinline{acquire}
-and
-\lstinline{release}
-invocations.
-%% 
-\section{Code: Locks}
-%% 
-Xv6 has two types of locks: spinlocks and sleep-locks.
-We'll start with spinlocks.
-Xv6 represents a spinlock as a
-\indexcode{struct spinlock}
-The important field in the structure is
-\lstinline{locked},
-a word that is zero when the lock is available
-and non-zero when it is held.
-Logically, xv6 should acquire a lock by executing code like
-\begin{lstlisting}[numbers=left,firstnumber=21]
-   void
-   acquire(struct spinlock *lk) // does not work!
-   {
-     for(;;) {
-       if(lk->locked == 0) {  (*@\label{line:testlocked}@*)
-         lk->locked = 1;      (*@\label{line:assign}@*)
-         break;
-       }
-     }
-   }
-\end{lstlisting}
-Unfortunately, this implementation does not
-guarantee mutual exclusion on a multiprocessor.
-It could happen that two CPUs simultaneously
-reach line~\ref{line:testlocked}, see that 
-\lstinline{lk->locked}
-is zero, and then both grab the lock by executing line~\ref{line:assign}.
-At this point, two different CPUs hold the lock,
-which violates the mutual exclusion property.
-What we need is a way to
-make lines \ref{line:testlocked} and \ref{line:assign} execute as an
-\indextext{atomic}
-(i.e., indivisible) step.
-
-Because locks are widely used,
-multi-core processors usually provide instructions that
-implement an atomic version of
-lines~\ref{line:testlocked} and \ref{line:assign}.
-On the RISC-V this instruction is
-\lstinline{amoswap r, a}.
-\lstinline{amoswap}
-reads the value at the memory address {\tt a},
-writes the contents of register {\tt r} to that address,
-and puts the value it read into {\tt r}.
-That is, it swaps the contents of the register and the memory address.
-It performs this sequence atomically, using special
-hardware to prevent any
-other CPU from using the memory address between the read and the write.
-
-Xv6's 
-\indexcode{acquire}
-uses the portable C library call 
-\lstinline{__sync_lock_test_and_set},
-which boils down to the
-\lstinline{amoswap}
-instruction;
-the return value is the old (swapped) contents of
-\lstinline{lk->locked}.
-The
-\lstinline{acquire}
-function wraps the swap in a loop, retrying (spinning) until it has
-acquired the lock.
-Each iteration swaps one into
-\lstinline{lk->locked} 
-and checks the previous value;
-if the previous value is zero, then we've acquired the
-lock, and the swap will have set 
-\lstinline{lk->locked}
-to one.
-If the previous value is one, then some other CPU
-holds the lock, and the fact that we atomically swapped one into
-\lstinline{lk->locked}
-didn't change its value.
-
-Once the lock is acquired,
-\lstinline{acquire}
-records, for debugging, the CPU 
-that acquired the lock.
-The
-\lstinline{lk->cpu}
-field is protected by the lock
-and must only be changed while holding the lock.
-
-The function
-\indexcode{release}
-is the opposite of 
-\lstinline{acquire}:
-it clears the 
-\lstinline{lk->cpu}
-field
-and then releases the lock.
-Conceptually, the release just requires assigning zero to
-\lstinline{lk->locked}.
-The C standard allows compilers to implement an assignment
-with multiple store instructions,
-so a C assignment might be non-atomic with respect
-to concurrent code.
-Instead,
-\lstinline{release}
-uses the C library function
-\lstinline{__sync_lock_release}
-that performs an atomic assignment.
-This function also boils down to a RISC-V
-\lstinline{amoswap}
-instruction.
-%% 
-\section{Code: Using locks}
-%% 
-Xv6 uses locks in many places to avoid races.
-As described above,
-\lstinline{kalloc}
-and
-\lstinline{kfree}
-form a good example.
-Try Exercises 1 and 2 to see what happens if those
-functions omit the locks.
-You'll likely find that it's difficult to trigger incorrect
-behavior, suggesting that it's hard to reliably test whether code
-is free from locking errors and races.
-Xv6 may well have as-yet-undiscovered races.
-
-A hard part about using locks is deciding how many locks
-to use and which data and invariants each lock should protect.
-There are a few basic principles.
-First, any time a variable can be written by one CPU
-at the same time that another CPU can read or write it,
-a lock should be used to keep the two
-operations from overlapping.
-Second, remember that locks protect invariants:
-if an invariant involves multiple memory locations,
-typically all of them need to be protected
-by a single lock to ensure the invariant is maintained.
-
-The rules above say when locks are necessary but say nothing about when locks
-are unnecessary, and it is important for efficiency not to lock too much,
-because locks reduce parallelism.  If parallelism isn't important, then one
-could arrange to have only a single thread and not worry about locks.  A simple
-kernel can do this on a multiprocessor by having a single lock that must be
-acquired on entering the kernel and released on exiting the kernel (though
-blocking system calls such as pipe reads or
-\lstinline{wait}
-would pose a problem).  Many uniprocessor operating systems have been converted to
-run on multiprocessors using this approach, sometimes called a ``big
-kernel lock,'' but the approach sacrifices parallelism: only one
-CPU can execute in the kernel at a time.  If the kernel does any heavy
-computation, it would be more efficient to use a larger set of more
-fine-grained locks, so that the kernel could execute on multiple CPUs
-simultaneously.
-
-As an example of coarse-grained locking, xv6's \lstinline{kalloc.c}
-allocator has a single free list protected by a single lock. If
-multiple processes on different CPUs try to allocate pages at the same
-time, each will have to wait for its turn by spinning in {\tt
-  acquire}. Spinning wastes CPU time, since it's not useful work.
-If contention for the lock wasted a significant fraction of CPU time,
-perhaps performance could be improved by changing the allocator design
-to have multiple free lists, each with its own lock, to allow truly
-parallel allocation.
-
-As an example of fine-grained locking, xv6 has a separate lock for
-each file, so that processes that manipulate different files can often
-proceed without waiting for each other's locks. The file locking
-scheme could be made even more fine-grained if one wanted to allow
-processes to simultaneously write different areas of the same file.
-Ultimately lock granularity decisions need to be driven by performance
-measurements as well as complexity considerations.
-
-As subsequent chapters explain each part of xv6, they
-will mention examples of xv6's use of locks
-to deal with concurrency.
-As a preview,
-Figure~\ref{fig:locktable}
-lists all of the locks in xv6.
-
-\begin{figure}[t]
-\center
-\begin{tabular}{ll}
-{\bf Lock} & {\bf Description} \\
-\midrule
-bcache.lock & Protects allocation of block buffer cache entries \\
-cons.lock & Serializes access to console hardware, avoids intermixed output \\
-ftable.lock & Serializes allocation of a struct file in file table \\
-itable.lock & Protects allocation of in-memory inode entries \\
-vdisk\_lock & Serializes access to disk hardware and queue of DMA descriptors \\
-kmem.lock & Serializes allocation of memory \\
-log.lock & Serializes operations on the transaction log \\
-pipe's pi->lock & Serializes operations on each pipe \\
-pid\_lock & Serializes increments of next\_pid \\
-proc's p->lock & Serializes changes to process's state \\
-wait\_lock & Helps wait avoid lost wakeups \\
-tickslock & Serializes operations on the ticks counter \\
-inode's ip->lock & Serializes operations on each inode and its content \\
-buf's b->lock & Serializes operations on each block buffer \\
-\end{tabular}
-\caption{Locks in xv6}
-\label{fig:locktable}
-\end{figure}
-
-%% 
-\section{Deadlock and lock ordering}
-%% 
-If a code path through the kernel must hold several locks at the same time, it is
-important that all code paths acquire those locks in the same order.  If
-they don't, there is a risk of \indextext{deadlock}.  Let's say two code paths in
-xv6 need locks A and B, but code path 1 acquires locks in the order A
-then B, and the other path acquires them in the order B then A.
-Suppose thread T1 executes code path 1 and acquires lock A,
-and thread T2 executes code path 2 and acquires lock B.
-Next T1 will try to acquire lock B, and T2 will try to acquire lock A.
-Both acquires will block indefinitely, because in both cases the
-other thread holds the needed lock, and won't release it until
-its acquire returns.
-To avoid such deadlocks, all code paths must acquire
-locks in the same order. The need for a global lock acquisition order
-means that locks are effectively part of each function's specification: 
-callers must invoke functions in a way that causes locks to be acquired
-in the agreed-on order.
-
-Xv6 has many lock-order chains of length two involving
-per-process locks
-(the lock in each
-\lstinline{struct proc})
-due to the way that
-\lstinline{sleep}
-works (see Chapter~\ref{CH:SCHED}).
-For example,
-\lstinline{consoleintr}
-is the interrupt routine which handles typed characters.
-When a newline arrives, any process that is waiting for
-console input should be woken up.
-To do this,
-\lstinline{consoleintr}
-holds
-\lstinline{cons.lock}
-while calling 
-\indexcode{wakeup},
-which acquires 
-the waiting process's lock in order to wake it up.
-In consequence, the global deadlock-avoiding
-lock order includes the rule that
-\lstinline{cons.lock}
-must be acquired before any process lock.
-The file-system code contains xv6's longest lock chains.
-For example, creating a file requires simultaneously
-holding a lock on the directory, a lock on the new file's inode,
-a lock on a disk block buffer, 
-the disk driver's \lstinline{vdisk_lock},
-and
-the calling process's \lstinline{p->lock}.
-To avoid deadlock, file-system code always acquires locks in the order
-mentioned in the previous sentence.
-
-Honoring a global deadlock-avoiding order can be surprisingly
-difficult. Sometimes the lock order conflicts with logical program
-structure, e.g., perhaps code module M1 calls module M2, but the lock
-order requires that a lock in M2 be acquired before a lock in M1.
-Sometimes the identities of locks aren't known in advance, perhaps
-because one lock must be held in order to discover the identity
-of the lock to be acquired next. This kind of situation arises in the
-file system as it looks up successive components in a path name, and
-in the code for {\tt wait} and {\tt exit} as they search the table of
-processes looking for child processes. Finally, the danger of deadlock
-is often a constraint on how fine-grained one can make a locking
-scheme, since more locks often means more opportunity for deadlock.
-The need to avoid deadlock is often a major factor in kernel
-implementation.
-
-\section{Re-entrant locks}
-
-It might appear that some deadlocks and lock-ordering challenges could
-be avoided by using \indextext{re-entrant locks}, which are also
-called \indextext{recursive locks}.  The idea is that if the lock is held
-by a process and if that process attempts to acquire the lock again,
-then the kernel could just allow this (since the process already has
-the lock), instead of calling panic, as the xv6 kernel does.
-
-It turns out, however, that re-entrant locks make it harder to reason
-about concurrency: re-entrant locks break the intuition that locks
-cause critical sections to be atomic with respect to other critical
-sections.  Consider the following functions \lstinline{f}
-and \lstinline{g}, and a hypothetical function \lstinline{h}:
-
-\begin{lstlisting}
-struct spinlock lock;
-int data = 0; // protected by lock
-
-f() {
-  acquire(&lock);
-  if(data == 0){
-    call_once();
-    h();
-    data = 1;
-  }
-  release(&lock);
-}
-
-g() {
-  aquire(&lock);
-  if(data == 0){
-    call_once();
-    data = 1;
-  }
-  release(&lock);
-}
-
-h() {
-    ...
-}
-\end{lstlisting}
-
-Looking at this code fragment, the intuition is that
-\lstinline{call_once} will be called
-only once: either by \lstinline{f}, or by \lstinline{g}, but not by
-both.
-
-But if re-entrant locks are allowed, and \lstinline{h} happens to call
-\lstinline{g}, \lstinline{call_once}
-will be called \emph{twice}.
-
-If re-entrant locks aren't allowed, then \lstinline{h} calling
-\lstinline{g} results in a deadlock, which is not great either. But,
-assuming it would be a serious error to call
-\lstinline{call_once}, a deadlock is
-preferable.  The kernel developer will observe the deadlock (the
-kernel panics) and can fix the code to avoid it, while calling
-\lstinline{call_once} twice may
-silently result in an error that is difficult to track down.
-
-For this reason, xv6 uses the simpler to understand non-re-entrant
-locks.  As long as programmers keep the locking rules in mind,
-however, either approach can be made to work. If xv6 were to use
-re-entrant locks, one would have to modify \lstinline{acquire} to
-notice that the lock is currently held by the calling thread. One
-would also have to add a count of nested acquires to struct spinlock,
-in similar style to \lstinline{push_off}, which is discussed next.
-
-\section{Locks and interrupt handlers}
-\label{s:lockinter}
-
-%% 
-Some xv6 spinlocks protect data that is used by
-both threads and interrupt handlers.
-For example, the
-\lstinline{clockintr}
-timer interrupt handler might increment
-\indexcode{ticks} 
-at about the same time that a kernel
-thread reads
-\lstinline{ticks} 
-in
-\indexcode{sys_sleep}
-The lock
-\indexcode{tickslock}
-serializes the two accesses.
-
-The interaction of spinlocks and interrupts raises a potential danger.
-Suppose
-\indexcode{sys_sleep}
-holds
-\indexcode{tickslock},
-and its CPU is interrupted by a timer interrupt.
-\lstinline{clockintr}
-would try to acquire
-\lstinline{tickslock},
-see it was held, and wait for it to be released.
-In this situation,
-\lstinline{tickslock}
-will never be released: only
-\lstinline{sys_sleep}
-can release it, but
-\lstinline{sys_sleep}
-will not continue running until
-\lstinline{clockintr}
-returns.
-So the CPU will deadlock, and any code
-that needs either lock will also freeze.
-
-To avoid this situation, if a spinlock is used by an interrupt handler,
-a CPU must never hold that lock with interrupts enabled.
-Xv6 is more conservative: when a CPU acquires any
-lock, xv6 always disables interrupts on that CPU.
-Interrupts may still occur on other CPUs, so 
-an interrupt's
-\lstinline{acquire}
-can wait for a thread to release a spinlock; just not on the same CPU.
-
-Xv6 re-enables interrupts when a CPU holds no spinlocks; it must
-do a little book-keeping to cope with nested critical sections.
-\lstinline{acquire}
-calls
-\indexcode{push_off}
-and
-\lstinline{release}
-calls
-\indexcode{pop_off}
-to track the nesting level of locks on the current CPU.
-When that count reaches zero,
-\lstinline{pop_off} 
-restores the interrupt enable state that existed 
-at the start of the outermost critical section.
-The
-\lstinline{intr_off}
-and
-\lstinline{intr_on}
-functions execute RISC-V instructions to disable and enable
-interrupts, respectively.
-
-It is important that
-\indexcode{acquire}
-call
-\lstinline{push_off}
-strictly before setting
-\lstinline{lk->locked}
-If the two were reversed, there would be
-a brief window when the lock
-was held with interrupts enabled, and
-an unfortunately timed interrupt would deadlock the system.
-Similarly, it is important that
-\indexcode{release}
-call
-\indexcode{pop_off}
-only after 
-releasing the lock
-
-%% 
-\section{Instruction and memory ordering}
-%% 
-
-It is natural to think of programs executing in the order
-in which source code statements appear.
-That's a reasonable mental model for single-threaded
-code, but is incorrect when
-multiple threads interact through shared memory~\cite{riscv:user,boehm04}.
-One reason is that compilers emit load and store
-instructions in orders different from those implied
-by the source code, and may entirely omit them
-(for example by caching data in registers).
-Another reason is that the CPU may execute instructions
-out of order to increase performance.
-For
-example, a CPU may notice that in a serial sequence of
-instructions A and B are not dependent on each other.
-The CPU may start instruction B first, either because its
-inputs are ready before A's inputs, or in order to overlap
-execution of A and B.
-
-As an example of what could go wrong,
-in this code for
-\lstinline{push},
-it would be a disaster if the compiler or CPU moved the
-store corresponding to
-line~\ref{line:next2} to a point after the
-\lstinline{release}
-on line~\ref{line:release}:
-\begin{lstlisting}[numbers=left,firstnumber=1]
-      l = malloc(sizeof *l);
-      l->data = data;
-      acquire(&listlock);
-      l->next = list;   (*@\label{line:next2}@*)
-      list = l;      
-      release(&listlock);  (*@\label{line:release}@*)
-\end{lstlisting}
-If such a re-ordering occurred, there would be a window during
-which another CPU could acquire the lock and
-observe the updated
-\lstinline{list},
-but see an uninitialized
-\lstinline{list->next}.
-
-The good news is that compilers and CPUs help concurrent programmers
-by following a set of rules called the \indextext{memory model}, and
-by providing some primitives to help programmers control re-ordering.
-
-To tell the hardware and compiler not to re-order,
-xv6 uses
-\lstinline{__sync_synchronize()} 
-in both
-and
-\lstinline{__sync_synchronize()}
-is a \indextext{memory barrier}:
-it tells the compiler and CPU to not reorder loads or stores across the
-barrier.
-The barriers in xv6's 
-\lstinline{acquire}
-and
-\lstinline{release}
-force order in almost all cases where it matters,
-since xv6 uses locks around accesses to shared data.
-Chapter~\ref{CH:LOCK2} discusses a few exceptions.
-
-%% 
-\section{Sleep locks}
-%% 
-
-% this material refers a lot to sleep, yield, etc, so maybe it should
-% be later, after sleep/wakeup in sched.tex.
-% maybe in lock2.tex
-
-Sometimes xv6 needs to hold a lock for a long time. For example, the
-file system (Chapter~\ref{CH:FS}) keeps a file locked while reading
-and writing its content on the disk, and these disk operations can
-take tens of milliseconds. Holding a spinlock that long would lead to
-waste if another process wanted to acquire it, since the acquiring
-process would waste CPU for a long time while spinning. Another
-drawback of spinlocks is that a process cannot yield the CPU while
-retaining a spinlock; we'd like to do this so that other processes can
-use the CPU while the process with the lock waits for the disk.
-Yielding while holding a spinlock is illegal because it might
-lead to deadlock if a second thread then tried to acquire the spinlock;
-since {\tt acquire} doesn't yield the CPU, the second thread's
-spinning might
-prevent the first thread from running and releasing the lock.
-% it's true that timer interrupts might force a switch from the
-% second back to the first thread -- but not if the second
-% already holds one or more locks.
-% it's also true that the danger is most obvious on a uniprocessor,
-% but it can also arise with a longer chain of threads on
-% a multiprocessor.
-Yielding while holding a lock would also violate
-the requirement that interrupts must be off while a spinlock is held.
-Thus we'd like a type of lock that yields the CPU while waiting to
-acquire, and allows yields (and interrupts) while the lock is held.
-
-Xv6 provides such locks in the form of
-\indextext{sleep-locks}.
-\lstinline{acquiresleep}
-yields the CPU while waiting,
-using techniques that will be explained in
-Chapter~\ref{CH:SCHED}.
-At a high level, a sleep-lock has a
-\lstinline{locked}
-field that is protected by a spinlock, and 
-\lstinline{acquiresleep} 's
-call to
-\lstinline{sleep}
-atomically yields the CPU and releases the spinlock.
-The result is that other threads can execute while
-\lstinline{acquiresleep}
-waits.
-
-Because sleep-locks leave interrupts enabled, they cannot be
-used in interrupt handlers.
-Because
-\lstinline{acquiresleep}
-may yield the CPU,
-sleep-locks cannot be used inside spinlock critical
-sections (though spinlocks can be used inside sleep-lock
-critical sections).
-
-Spin-locks are best suited to short critical sections,
-since waiting for them wastes CPU time;
-sleep-locks work well for lengthy operations.
-
-%% 
-\section{Real world}
-%% 
-Programming with locks remains challenging despite years of research
-into concurrency primitives and parallelism.
-It is often best to conceal locks within 
-higher-level constructs like synchronized queues, although xv6 does not
-do this.  If you program with locks, it is wise to use a tool that attempts to
-identify races, because it is easy to miss an invariant that requires
-a lock.
-
-Most operating systems support POSIX threads (Pthreads), which allow a
-user process to have several threads running concurrently on different
-CPUs.  Pthreads has support for user-level locks, barriers, etc.
-Pthreads also allows a programmer to optionally specify that a lock
-should be re-entrant.
-
-Supporting Pthreads at user level requires support from the operating
-system. For example, it should be the case that if one pthread blocks
-in a system call, another pthread of the same process should be able
-to run on that CPU.  As another example, if a pthread changes its
-process's address space (e.g., maps or unmaps memory), the kernel must
-arrange that other CPUs that run threads of the same process update
-their hardware page tables to reflect the change in the address space.
-
-It is possible to implement locks without atomic
-instructions~\cite{lamport:bakery}, but it is expensive, and most
-operating systems use atomic instructions.
-
-Locks can be expensive if many CPUs try to acquire the same lock
-at the same time.  If one CPU has a lock
-cached in its local cache, and another CPU must acquire the lock, then the
-atomic instruction to update the cache line that holds the lock must move the line
-from the one CPU's cache to the other CPU's cache, and perhaps
-invalidate any other copies of the cache line.  Fetching a cache line from
-another CPU's cache can be orders of magnitude more expensive than
-fetching a line from a local cache.
-
-To avoid the expenses associated with locks, many operating systems
-use lock-free data structures and algorithms~\cite{herlihy:art,mckenney:rcuusage}.
-For example, it is possible to implement a linked list like the one in
-the beginning of the chapter that requires no locks during list
-searches, and one atomic instruction to insert an item in a list.
-Lock-free programming is more complicated, however, than programming
-locks; for example, one must worry about instruction and memory
-reordering.  Programming with locks is already hard, so xv6 avoids the
-additional complexity of lock-free programming.
-
-%% 
-\section{Exercises}
-%% 
-
-\begin{enumerate}
-  
-\item Comment out the calls to
-\lstinline{acquire}
-and
-\lstinline{release}
-in
-\lstinline{kalloc}
-This seems like it should cause problems for
-kernel code that calls
-\lstinline{kalloc};
-what symptoms do you expect to see?
-When you run xv6, do you see these symptoms?
-How about when running
-\lstinline{usertests}?
-If you don't see a problem, why not?
-See if you can provoke a problem by inserting
-dummy loops into the critical section of
-\lstinline{kalloc}.
-
-\item Suppose that you instead commented out the
-locking in
-\lstinline{kfree} 
-(after restoring locking in
-\lstinline{kalloc}).
-What might now go wrong? Is lack of locks in
-\lstinline{kfree}
-less harmful than in
-\lstinline{kalloc}?
-
-\item If two CPUs call
-\lstinline{kalloc}
-at the same time, one will have to wait for the other,
-which is bad for performance.
-Modify 
-\lstinline{kalloc.c}
-to have more parallelism, so that simultaneous
-calls to
-\lstinline{kalloc}
-from different CPUs can proceed without waiting for each other.
-
-\item Write a parallel program using POSIX threads, which is supported on most
-operating systems. For example, implement a parallel hash table and measure if
-the number of puts/gets scales with increasing number of CPUs.
-
-\item Implement a subset of Pthreads in xv6.  That is, implement a user-level
-thread library so that a user process can have more than 1 thread and arrange
-that these threads can run in parallel on different CPUs.  Come up with a
-design that correctly handles a thread making a blocking system call and
-changing its shared address space.
-
-\end{enumerate}
-
-% LocalWords:  CPUs uniprocessor interruptible allocator kalloc kfree
-% LocalWords:  struct malloc sizeof listlock invariants spinlock lk
-% LocalWords:  amoswap cpu bcache ftable itable inode vdisk DMA kmem
-% LocalWords:  pid proc's tickslock inode's ip buf's proc SCHED sys
-% LocalWords:  consoleintr wakeup clockintr intr acquiresleep POSIX
-% LocalWords:  Pthreads pthread unmaps TLB IPIs
+Capítulo  4
+ Armadilhas  e  chamadas  de  sistema
+ Existem  três  tipos  de  eventos  que  fazem  com  que  a  CPU  interrompa  a  execução  normal  de  instruções  e  force  a  
+transferência  de  controle  para  um  código  especial  que  lida  com  o  evento.  Uma  situação  é  uma  chamada  de  sistema,  
+quando  um  programa  de  usuário  executa  a  instrução  ecall  para  solicitar  que  o  kernel  faça  algo  por  ele.  Outra  situação  é  
+uma  exceção:  uma  instrução  (de  usuário  ou  kernel)  faz  algo  ilegal,  como  dividir  por  zero  ou  usar  um  endereço  virtual  
+inválido.  A  terceira  situação  é  uma  interrupção  de  dispositivo,  quando  um  dispositivo  sinaliza  que  precisa  de  atenção,  por  
+exemplo,  quando  o  hardware  do  disco  conclui  uma  solicitação  de  leitura  ou  gravação.
+ Este  livro  usa  "trap"  como  um  termo  genérico  para  essas  situações.  Normalmente,  qualquer  código  que  estivesse  
+em  execução  no  momento  da  trap  precisará  ser  retomado  posteriormente  e  não  precisaria  estar  ciente  de  que  algo  
+especial  aconteceu.  Ou  seja,  frequentemente  queremos  que  as  traps  sejam  transparentes;  isso  é  particularmente  
+importante  para  interrupções  de  dispositivo,  que  o  código  interrompido  normalmente  não  espera.  A  sequência  usual  é  
+que  uma  trap  força  uma  transferência  de  controle  para  o  kernel;  o  kernel  salva  registradores  e  outros  estados  para  que  a  
+execução  possa  ser  retomada;  o  kernel  executa  o  código  manipulador  apropriado  (por  exemplo,  uma  implementação  de  
+chamada  de  sistema  ou  driver  de  dispositivo);  o  kernel  restaura  o  estado  salvo  e  retorna  da  trap;  e  o  código  original  
+continua  de  onde  parou.
+ O  Xv6  lida  com  todas  as  armadilhas  no  kernel;  as  armadilhas  não  são  entregues  ao  código  do  usuário.  Lidar  com  
+armadilhas  no  kernel  é  natural  para  chamadas  de  sistema.  Faz  sentido  para  interrupções,  já  que  o  isolamento  exige  que  
+apenas  o  kernel  tenha  permissão  para  usar  dispositivos  e  porque  o  kernel  é  um  mecanismo  conveniente  para  compartilhar  
+dispositivos  entre  vários  processos.  Também  faz  sentido  para  exceções,  já  que  o  Xv6  responde  a  todas  as  exceções  do  
+espaço  do  usuário  eliminando  o  programa  ofensivo.
+ O  tratamento  de  traps  Xv6  ocorre  em  quatro  etapas:  ações  de  hardware  executadas  pela  CPU  RISC-V,  algumas  
+instruções  de  montagem  que  preparam  o  caminho  para  o  código  C  do  kernel,  uma  função  C  que  decide  o  que  fazer  com  
+o  trap  e  a  chamada  de  sistema  ou  rotina  de  serviço  do  driver  de  dispositivo.  Embora  a  semelhança  entre  os  três  tipos  de  
+traps  sugira  que  um  kernel  poderia  lidar  com  todos  os  traps  com  um  único  caminho  de  código,  torna-se  conveniente  ter  
+código  separado  para  três  casos  distintos:  traps  do  espaço  do  usuário,  traps  do  espaço  do  kernel  e  interrupções  de  
+temporizador.  O  código  do  kernel  (assembler  ou  C)  que  processa  um  trap  é  frequentemente  chamado  de  manipulador;  
+as  primeiras  instruções  do  manipulador  são  geralmente  escritas  em  assembler  (em  vez  de  C)  e,  às  vezes,  são  chamadas  
+de  vetor.
+ 43
+Machine Translated by Google
+ 4.1  Máquinas  de  armadilha  RISC-V
+ Cada  CPU  RISC-V  possui  um  conjunto  de  registradores  de  controle  que  o  kernel  escreve  para  informar  
+à  CPU  como  lidar  com  traps,  e  que  o  kernel  pode  ler  para  descobrir  se  um  trap  ocorreu.  Os  
+documentos  RISC-V  contêm  a  história  completa  [3].  riscv.h  (kernel/riscv.h:1)  contém  definições  que  o  xv6  usa.
+ Aqui  está  um  esboço  dos  registros  mais  importantes:
+ •  stvec:  O  kernel  escreve  o  endereço  do  seu  manipulador  de  trap  aqui;  o  RISC-V  salta  para  o
+ endereço  em  stvec  para  manipular  uma  armadilha.
+ •
+ sepc:  Quando  ocorre  uma  trap,  o  RISC-V  salva  o  contador  de  programa  aqui  (já  que  o  pc  é  então  sobrescrito  pelo  
+valor  em  stvec).  A  instrução  sret  (retorno  da  trap)  copia  o  sepc  para  o  pc.  O  kernel  pode  escrever  sepc  para  controlar  
+para  onde  o  sret  vai.
+ •  causa:  o  RISC-V  coloca  um  número  aqui  que  descreve  o  motivo  da  armadilha.
+ •  sscratch:  O  código  do  manipulador  de  traps  usa  sscratch  para  ajudar  a  evitar  a  substituição  de  registros  de  usuários
+ antes  de  salvá-los.
+ •  sstatus:  O  bit  SIE  em  sstatus  controla  se  as  interrupções  do  dispositivo  estão  habilitadas.  Se  o  kernel  limpar  o  SIE,  
+o  RISC-V  adiará  as  interrupções  do  dispositivo  até  que  o  kernel  configure  o  SIE.  O  bit  SPP  indica  se  uma  
+interceptação  veio  do  modo  usuário  ou  do  modo  supervisor  e  controla  para  qual  modo  sret  retorna.
+ Os  registradores  acima  referem-se  a  traps  manipulados  no  modo  supervisor  e  não  podem  ser  lidos  ou  escritos  no  modo  
+usuário.  Existe  um  conjunto  semelhante  de  registradores  de  controle  para  traps  manipulados  no  modo  máquina;  o  xv6  os  
+utiliza  apenas  para  o  caso  especial  de  interrupções  de  temporizador.
+ Cada  CPU  em  um  chip  multinúcleo  tem  seu  próprio  conjunto  desses  registradores,  e  mais  de  uma  CPU  pode  estar  
+manipulando  uma  armadilha  a  qualquer  momento.
+ Quando  precisa  forçar  uma  armadilha,  o  hardware  RISC-V  faz  o  seguinte  para  todos  os  tipos  de  armadilha  (exceto  
+interrupções  de  temporizador):
+ 1.  Se  a  armadilha  for  uma  interrupção  de  dispositivo  e  o  bit  SIE  sstatus  estiver  limpo,  não  faça  nada
+ seguindo.
+ 2.  Desabilite  as  interrupções  limpando  o  bit  SIE  em  sstatus.
+ 3.  Copie  o  pc  para  sepc.
+ 4.  Salve  o  modo  atual  (usuário  ou  supervisor)  no  bit  SPP  em  sstatus.
+ 5.  Defina  scause  para  refletir  a  causa  da  armadilha.
+ 6.  Defina  o  modo  como  supervisor.
+ 7.  Copie  stvec  para  o  pc.
+ 44
+Machine Translated by Google
+ 8.  Comece  a  executar  no  novo  PC.
+ Observe  que  a  CPU  não  alterna  para  a  tabela  de  páginas  do  kernel,  não  alterna  para  uma  pilha  no  kernel  e  não  salva  
+nenhum  registrador  além  do  pc.  O  software  do  kernel  deve  executar  essas  tarefas.
+ Um  motivo  pelo  qual  a  CPU  realiza  um  trabalho  mínimo  durante  uma  armadilha  é  para  fornecer  flexibilidade  ao  software;  por  
+exemplo,  alguns  sistemas  operacionais  omitem  uma  troca  de  tabela  de  páginas  em  algumas  situações  para  aumentar  o  
+desempenho  da  armadilha.
+ Vale  a  pena  considerar  se  algum  dos  passos  listados  acima  poderia  ser  omitido,  talvez  em  busca  de  armadilhas  mais  
+rápidas.  Embora  existam  situações  em  que  uma  sequência  mais  simples  possa  funcionar,  muitas  das  etapas  seriam  perigosas  
+se  omitidas  em  geral.  Por  exemplo,  suponha  que  a  CPU  não  alterne  os  contadores  de  programa.  Então,  uma  armadilha  do  
+espaço  do  usuário  poderia  alternar  para  o  modo  supervisor  enquanto  ainda  executa  instruções  do  usuário.  Essas  instruções  do  
+usuário  poderiam  quebrar  o  isolamento  usuário/kernel,  por  exemplo,  modificando  o  registrador  satp  para  apontar  para  uma  
+tabela  de  páginas  que  permitisse  o  acesso  a  toda  a  memória  física.
+ Portanto,  é  importante  que  a  CPU  alterne  para  um  endereço  de  instrução  especificado  pelo  kernel,  ou  seja,  stvec.
+ 4.2  Armadilhas  do  espaço  do  usuário
+ O  Xv6  lida  com  armadilhas  de  forma  diferente,  dependendo  se  elas  ocorrem  durante  a  execução  no  kernel  ou  no  código  
+do  usuário.  Aqui  está  a  história  das  armadilhas  do  código  do  usuário;  a  Seção  4.5  descreve  as  armadilhas  do  código  do  
+kernel.
+ Uma  armadilha  pode  ocorrer  durante  a  execução  no  espaço  do  usuário  se  o  programa  do  usuário  fizer  uma  chamada  de  
+sistema  (instrução  ecall),  ou  algo  ilegal,  ou  se  um  dispositivo  interromper.  O  caminho  de  alto  nível  de  uma  armadilha  do  espaço  
+do  usuário  é  uservec  (kernel/trampoline.S:21).  então  usertrap  (kernel/trap.c:37);  e  ao  retornar,  usertrapret  (kernel/trap.c:90)  e  
+então  userret  (kernel/trampoline.S:101).
+ Uma  grande  limitação  no  design  do  tratamento  de  traps  do  xv6  é  o  fato  de  que  o  hardware  RISC-V  não  alterna  entre  
+tabelas  de  páginas  ao  forçar  um  trap.  Isso  significa  que  o  endereço  do  manipulador  de  traps  em  stvec  deve  ter  um  mapeamento  
+válido  na  tabela  de  páginas  do  usuário,  já  que  essa  é  a  tabela  de  páginas  em  vigor  quando  o  código  de  tratamento  de  traps  
+começa  a  ser  executado.  Além  disso,  o  código  de  tratamento  de  traps  do  xv6  precisa  alternar  para  a  tabela  de  páginas  do  
+kernel;  para  poder  continuar  a  execução  após  essa  troca,  a  tabela  de  páginas  do  kernel  também  deve  ter  um  mapeamento  para  
+o  manipulador  apontado  por  stvec.
+ O  Xv6  atende  a  esses  requisitos  usando  uma  página  de  trampolim.  A  página  de  trampolim  contém  uservec,
+ O  código  de  manipulação  de  traps  xv6  para  o  qual  stvec  aponta.  A  página  do  trampolim  é  mapeada  na  tabela  de  páginas  de  
+cada  processo  no  endereço  TRAMPOLINE,  que  está  no  topo  do  espaço  de  endereço  virtual,  de  modo  que  estará  acima  da  
+memória  que  os  programas  usam  para  si  mesmos.  A  página  do  trampolim  também  é  mapeada  no  endereço  TRAMPOLINE  na  
+tabela  de  páginas  do  kernel.  Veja  as  Figuras  2.3  e  3.3.  Como  a  página  do  trampolim  é  mapeada  na  tabela  de  páginas  do  
+usuário,  sem  o  sinalizador  PTE_U,  as  traps  podem  começar  a  ser  executadas  lá  no  modo  supervisor.  Como  a  página  do  
+trampolim  é  mapeada  no  mesmo  endereço  no  espaço  de  endereço  do  kernel,  o  manipulador  de  traps  pode  continuar  a  execução  
+após  alternar  para  a  tabela  de  páginas  do  kernel.
+ O  código  para  o  manipulador  de  armadilhas  uservec  está  em  trampoline.S  (kernel/trampoline.S:21).  Quando  o  uservec  
+inicia,  todos  os  32  registradores  contêm  valores  pertencentes  ao  código  de  usuário  interrompido.  Esses  32  valores  precisam  
+ser  salvos  em  algum  lugar  na  memória,  para  que  possam  ser  restaurados  quando  a  armadilha  retornar  ao  espaço  do  usuário.  
+Armazenar  na  memória  requer  o  uso  de  um  registrador  para  armazenar  o  endereço,  mas  neste  ponto  não  há
+ 45
+Machine Translated by Google
+ Não  há  registradores  de  uso  geral  disponíveis!  Felizmente,  o  RISC-V  oferece  uma  ajuda  na  forma  do  registrador  
+sscratch.  A  instrução  csrw  no  início  de  uservec  salva  a0  em  sscratch.
+ Agora  o  uservec  tem  um  registrador  (a0)  para  brincar.
+ A  próxima  tarefa  do  uservec  é  salvar  os  32  registradores  de  usuário.  O  kernel  aloca,  para  cada  processo,  uma  
+página  de  memória  para  uma  estrutura  trapframe  que  (entre  outras  coisas)  tem  espaço  para  salvar  os  32  registradores  
+de  usuário  (kernel/proc.h:43).  Como  satp  ainda  se  refere  à  tabela  de  páginas  do  usuário,  uservec  precisa  que  o  
+trapframe  seja  mapeado  no  espaço  de  endereço  do  usuário.  Xv6  mapeia  o  trapframe  de  cada  processo  no  endereço  
+virtual  TRAPFRAME  na  tabela  de  páginas  do  usuário  desse  processo;  TRAPFRAME  está  logo  abaixo  de  TRAMPOLINE.
+ O  p->trapframe  do  processo  também  aponta  para  o  trapframe,  embora  em  seu  endereço  físico,  para  que  o  kernel  
+possa  usá-lo  por  meio  da  tabela  de  páginas  do  kernel.
+ Assim,  uservec  carrega  o  endereço  TRAPFRAME  em  a0  e  salva  todos  os  registros  do  usuário  lá,  incluindo  o  a0  
+do  usuário,  lidos  do  zero.
+ O  trapframe  contém  o  endereço  da  pilha  do  kernel  do  processo  atual,  o  hartid  da  CPU  atual,  o  endereço  da  função  
+usertrap  e  o  endereço  da  tabela  de  páginas  do  kernel.  uservec  recupera  esses  valores,  alterna  satp  para  a  tabela  de  
+páginas  do  kernel  e  chama  usertrap.
+ O  trabalho  do  usertrap  é  determinar  a  causa  da  armadilha,  processá-la  e  retornar  (kernel/-  trap.c:37).  Primeiro,  ele  
+altera  stvec  para  que  uma  trap  enquanto  estiver  no  kernel  seja  manipulada  por  kernelvec  em  vez  de  uservec.  Ele  salva  
+o  registrador  sepc  (o  contador  de  programa  do  usuário  salvo),  porque  usertrap  pode  chamar  yield  para  alternar  para  a  
+thread  do  kernel  de  outro  processo,  e  esse  processo  pode  retornar  ao  espaço  do  usuário,  no  processo  do  qual  ele  
+modificará  sepc.  Se  a  trap  for  uma  chamada  de  sistema,  usertrap  chama  syscall  para  manipulá-la;  se  for  uma  
+interrupção  de  dispositivo,  devintr;  caso  contrário,  é  uma  ex-ception,  e  o  kernel  mata  o  processo  com  falha.  O  caminho  
+da  chamada  de  sistema  adiciona  quatro  ao  contador  de  programa  do  usuário  salvo  porque  o  RISC-V,  no  caso  de  uma  
+chamada  de  sistema,  deixa  o  ponteiro  do  programa  apontando  para  a  instrução  ecall,  mas  o  código  do  usuário  precisa  
+retomar  a  execução  na  instrução  subsequente.
+ Na  saída,  o  usertrap  verifica  se  o  processo  foi  encerrado  ou  se  deve  render  a  CPU  (se  essa  armadilha  for  uma  
+interrupção  de  timer).
+ O  primeiro  passo  para  retornar  ao  espaço  do  usuário  é  a  chamada  para  usertrapret  (kernel/trap.c:90).  Esta  
+função  configura  os  registradores  de  controle  RISC-V  para  se  prepararem  para  uma  futura  captura  a  partir  do  
+espaço  do  usuário.  Isso  envolve  alterar  stvec  para  se  referir  a  uservec,  preparar  os  campos  do  trapframe  dos  
+quais  uservec  depende  e  definir  sepc  para  o  contador  de  programa  do  usuário  salvo  anteriormente.  No  final,  
+usertrapret  chama  userret  na  página  do  trampolim  mapeada  nas  tabelas  de  páginas  do  usuário  e  do  kernel;  o  
+motivo  é  que  o  código  assembly  em  userret  alternará  as  tabelas  de  páginas.
+ A  chamada  de  usertrapret  para  userret  passa  um  ponteiro  para  a  tabela  de  páginas  de  usuário  do  processo  em  
+a0  (kernel/trampoline.S:101).  userret  alterna  o  satp  para  a  tabela  de  páginas  do  usuário  do  processo.  Lembre-se  de  
+que  a  tabela  de  páginas  do  usuário  mapeia  tanto  a  página  do  trampolim  quanto  a  TRAPFRAME,  mas  nada  mais  do  kernel.
+ O  mapeamento  da  página  do  trampolim  no  mesmo  endereço  virtual  nas  tabelas  de  páginas  do  usuário  e  do  kernel  
+permite  que  o  userret  continue  executando  após  a  alteração  do  satp.  A  partir  deste  ponto,  os  únicos  dados  que  o  
+userret  pode  usar  são  o  conteúdo  do  registrador  e  o  conteúdo  do  trapframe.  O  userret  carrega  o  endereço  TRAPFRAME  
+em  a0,  restaura  os  registradores  de  usuário  salvos  do  trapframe  via  a0,  restaura  o  usuário  a0  salvo  e  executa  sret  
+para  retornar  ao  espaço  do  usuário.
+ 46
+Machine Translated by Google
+ 4.3  Código:  Chamando  chamadas  de  sistema
+ O  capítulo  2  terminou  com  initcode.S  invocando  a  chamada  de  sistema  exec  (user/initcode.S:11).  Vamos  ver  como  a  chamada  
+do  usuário  chega  à  implementação  da  chamada  do  sistema  exec  no  kernel.
+ initcode.S  coloca  os  argumentos  para  exec  nos  registradores  a0  e  a1,  e  coloca  o  número  da  chamada  do  sistema  em  a7.  
+Os  números  da  chamada  do  sistema  correspondem  às  entradas  no  array  syscalls,  uma  tabela  de  ponteiros  de  função  (kernel/
+ syscall.c:107).  A  instrução  ecall  é  capturada  no  kernel  e  faz  com  que  uservec,  usertrap  e  então  syscall  sejam  executados,  
+como  vimos  acima.
+ chamada  de  sistema  (kernel/syscall.c:132)  recupera  o  número  de  chamada  do  sistema  do  a7  salvo  no  trapframe
+ e  o  utiliza  para  indexar  chamadas  de  sistema.  Para  a  primeira  chamada  de  sistema,  a7  contém  SYS_exec  (kernel /syscall.h:8),  
+resultando  em  uma  chamada  para  a  função  de  implementação  de  chamada  do  sistema  sys_exec.
+ Quando  sys_exec  retorna,  syscall  registra  seu  valor  de  retorno  em  p->trapframe->a0.  Isso  fará  com  que  a  chamada  
+original  do  espaço  do  usuário  para  exec()  retorne  esse  valor,  já  que  a  convenção  de  chamada  C  no  RISC-V  coloca  os  valores  
+de  retorno  em  a0.  Chamadas  de  sistema  convencionalmente  retornam  números  negativos  para  indicar  erros  e  zero  ou  números  
+positivos  para  sucesso.  Se  o  número  da  chamada  de  sistema  for  inválido,  syscall  imprime  um  erro  e  retorna  -1.
+ 4.4  Código:  Argumentos  de  chamada  de  sistema
+ Implementações  de  chamadas  de  sistema  no  kernel  precisam  encontrar  os  argumentos  passados  pelo  código  do  usuário.  
+Como  o  código  do  usuário  chama  funções  wrapper  de  chamadas  de  sistema,  os  argumentos  estão  inicialmente  onde  a  
+convenção  de  chamada  RISC-VC  os  coloca:  em  registradores.  O  código  de  trap  do  kernel  salva  os  registradores  do  
+usuário  no  quadro  de  trap  do  processo  atual,  onde  o  código  do  kernel  pode  encontrá-los.  As  funções  do  kernel  argint,  
+argaddr  e  argfd  recuperam  o  n  'ésimo  argumento  de  chamada  de  sistema  do  quadro  de  trap  como  um  inteiro,  um  ponteiro  
+ou  um  descritor  de  arquivo.  Todas  elas  chamam  argraw  para  recuperar  o  registrador  de  usuário  salvo  apropriado  (kernel/syscall.c:34).
+ Algumas  chamadas  de  sistema  passam  ponteiros  como  argumentos,  e  o  kernel  deve  usar  esses  ponteiros  para  ler  ou  
+escrever  na  memória  do  usuário.  A  chamada  de  sistema  exec,  por  exemplo,  passa  ao  kernel  um  conjunto  de  ponteiros  
+referentes  a  argumentos  de  string  no  espaço  do  usuário.  Esses  ponteiros  apresentam  dois  desafios.  Primeiro,  o  programa  do  
+usuário  pode  estar  com  bugs  ou  ser  malicioso,  e  pode  passar  ao  kernel  um  ponteiro  inválido  ou  um  ponteiro  com  a  intenção  
+de  induzir  o  kernel  a  acessar  a  memória  do  kernel  em  vez  da  memória  do  usuário.  Segundo,  os  mapeamentos  de  tabelas  de  
+páginas  do  kernel  xv6  não  são  os  mesmos  que  os  mapeamentos  de  tabelas  de  páginas  do  usuário,  portanto,  o  kernel  não  
+pode  usar  instruções  comuns  para  carregar  ou  armazenar  a  partir  de  endereços  fornecidos  pelo  usuário.
+ O  kernel  implementa  funções  que  transferem  dados  com  segurança  de  e  para  endereços  fornecidos  pelo  usuário.  fetchstr  
+é  um  exemplo  (kernel/syscall.c:25).  Chamadas  de  sistema  de  arquivos  como  exec  usam  fetchstr  para  recuperar  argumentos  
+de  nome  de  arquivo  de  string  do  espaço  do  usuário.  fetchstr  chama  copyinstr  para  fazer  o  trabalho  pesado.  copyinstr  (kernel/
+ vm.c:403)  Copia  até  max  bytes  para  dst  do  endereço  virtual  srcva  na  tabela  de  páginas  do  usuário  pagetable.  Como  pagetable  
+não  é  a  tabela  de  páginas  atual,  copyinstr  usa  walkaddr  (que  chama  walk)  para  procurar  srcva  na  pagetable,  retornando  o  
+endereço  físico  pa0.  O  kernel  mapeia  cada  endereço  físico  de  RAM  para  o  endereço  virtual  do  kernel  correspondente,  de  
+modo  que  copyinstr  pode  copiar  diretamente  bytes  de  string  de  pa0  para  dst.  walkaddr  (kernel/vm.c:109)  verifica  se  o  endereço  
+virtual  fornecido  pelo  usuário  faz  parte  do  espaço  de  endereço  do  usuário  do  processo,  para  que  os  programas
+ 47
+Machine Translated by Google
+ não  consegue  enganar  o  kernel  para  que  ele  leia  outra  memória.  Uma  função  semelhante,  copyout,  copia  dados  do  kernel  para  
+um  endereço  fornecido  pelo  usuário.
+ 4.5  Armadilhas  do  espaço  do  kernel
+ O  Xv6  configura  os  registradores  de  trap  da  CPU  de  forma  um  pouco  diferente,  dependendo  se  o  código  do  usuário  ou  do  kernel  
+está  em  execução.  Quando  o  kernel  está  em  execução  em  uma  CPU,  o  kernel  aponta  stvec  para  o  código  assembly  em  kernelvec  
+(kernel/kernelvec.S:12).  Como  o  xv6  já  está  no  kernel,  o  kernelvec  pode  contar  com  satp  sendo  definido  na  tabela  de  páginas  do  
+kernel  e  com  o  ponteiro  da  pilha  se  referindo  a  uma  pilha  do  kernel  válida.  O  kernelvec  envia  todos  os  32  registradores  para  a  
+pilha,  de  onde  ele  os  restaurará  posteriormente  para  que  o  código  do  kernel  interrompido  possa  ser  retomado  sem  perturbações.
+ kernelvec  salva  os  registradores  na  pilha  da  thread  do  kernel  interrompida,  o  que  faz  sentido  porque  os  valores  dos  
+registradores  pertencem  a  essa  thread.  Isso  é  particularmente  importante  se  a  armadilha  causar  uma  troca  para  uma  thread  
+diferente  –  nesse  caso,  a  armadilha  retornará  da  pilha  da  nova  thread,  deixando  os  registradores  salvos  da  thread  interrompida  
+em  segurança  em  sua  pilha.
+ kernelvec  salta  para  kerneltrap  (kernel/trap.c:135)  Após  salvar  os  registradores,  o  kerneltrap  está  
+preparado  para  dois  tipos  de  armadilhas:  interrupções  de  dispositivo  e  exceções.  Ele  chama  devintr  (kernel/  -trap.c:178)  para  verificar  e  lidar  com  o  primeiro.  Se  a  armadilha  não  for  uma  interrupção  de  dispositivo,  deve  
+ser  uma  exceção,  e  isso  é  sempre  um  erro  fatal  se  ocorrer  no  kernel  xv6;  o  kernel  dispara  pânico  e  interrompe  
+a  execução.
+ Se  o  kerneltrap  foi  chamado  devido  a  uma  interrupção  do  temporizador  e  uma  thread  do  kernel  de  um  processo  está  em  
+execução  (em  oposição  a  uma  thread  do  escalonador),  o  kerneltrap  chama  o  método  yield  para  dar  a  outras  threads  a  chance  
+de  executar.  Em  algum  momento,  uma  dessas  threads  irá  executar  o  método  yield,  permitindo  que  nossa  thread  e  sua  kerneltrap  
+sejam  retomadas.  O  Capítulo  7  explica  o  que  acontece  no  método  yield.
+ Quando  o  trabalho  do  kerneltrap  termina,  ele  precisa  retornar  ao  código  que  foi  interrompido  pela  armadilha.  Como  um  yield  
+pode  ter  perturbado  o  sepc  e  o  modo  anterior  em  sstatus,  o  kerneltrap  os  salva  ao  iniciar.  Agora,  ele  restaura  esses  registradores  
+de  controle  e  retorna  ao  kernelvec  (kernel/kernelvec.S:50).  kernelvec  retira  os  registradores  salvos  da  pilha  e  executa  sret,  que  
+copia  sepc  para  pc  e  retoma  o  código  do  kernel  interrompido.
+ Vale  a  pena  pensar  em  como  o  retorno  do  trap  acontece  se  o  kerneltrap  chamar  yield  devido  a  uma  interrupção  do  
+temporizador.
+ O  Xv6  define  o  stvec  de  uma  CPU  como  kernelvec  quando  essa  CPU  entra  no  kernel  pelo  espaço  do  
+usuário;  você  pode  ver  isso  em  usertrap  (kernel/trap.c:29).  Há  uma  janela  de  tempo  em  que  o  kernel  inicia  a  
+execução,  mas  stvec  ainda  está  definido  como  uservec,  e  é  crucial  que  nenhuma  interrupção  de  dispositivo  
+ocorra  durante  essa  janela.  Felizmente,  o  RISC-V  sempre  desabilita  as  interrupções  quando  começa  a  receber  
+uma  captura,  e  o  xv6  não  as  habilita  novamente  até  que  stvec  seja  definido.
+ 4.6  Exceções  de  falha  de  página
+ A  resposta  do  Xv6  a  exceções  é  bastante  tediosa:  se  uma  exceção  acontece  no  espaço  do  usuário,  o  kernel  encerra  o  processo  
+com  falha.  Se  uma  exceção  acontece  no  kernel,  o  kernel  entra  em  pânico.  Operação  real
+ 48
+Machine Translated by Google
+ os  sistemas  geralmente  respondem  de  maneiras  muito  mais  interessantes.
+ Como  exemplo,  muitos  kernels  usam  falhas  de  página  para  implementar  bifurcações  de  cópia  na  escrita  (COW).  Para  explicar  a  
+bifurcação  de  cópia  na  escrita,  considere  a  bifurcação  do  xv6,  descrita  no  Capítulo  3.  A  bifurcação  faz  com  que  o  conteúdo  de  memória  
+inicial  do  filho  seja  o  mesmo  do  pai  no  momento  da  bifurcação.  O  Xv6  implementa  a  bifurcação  com  uvmcopy  (kernel/vm.c:306).  que  
+aloca  memória  física  para  o  filho  e  copia  a  memória  do  pai  para  ela.  Seria  mais  eficiente  se  o  filho  e  o  pai  pudessem  compartilhar  a  
+memória  física  do  pai.  Uma  implementação  direta  disso  não  funcionaria,  no  entanto,  pois  faria  com  que  o  pai  e  o  filho  interrompessem  
+a  execução  um  do  outro  com  suas  gravações  na  pilha  e  no  heap  compartilhados.
+ Pai  e  filho  podem  compartilhar  memória  física  com  segurança  por  meio  do  uso  apropriado  de  permissões  de  tabela  
+de  páginas  e  falhas  de  página.  A  CPU  gera  uma  exceção  de  falha  de  página  quando  um  endereço  virtual  é  usado  sem  
+mapeamento  na  tabela  de  páginas,  ou  tem  um  mapeamento  cujo  sinalizador  PTE_V  está  limpo,  ou  um  mapeamento  cujos  
+bits  de  permissão  (PTE_R,  PTE_W,  PTE_X,  PTE_U)  proíbem  a  operação  que  está  sendo  tentada.  O  RISC-V  distingue  
+três  tipos  de  falha  de  página:  falhas  de  página  de  carregamento  (quando  uma  instrução  de  carregamento  não  consegue  
+traduzir  seu  endereço  virtual),  falhas  de  página  de  armazenamento  (quando  uma  instrução  de  armazenamento  não  
+consegue  traduzir  seu  endereço  virtual)  e  falhas  de  página  de  instrução  (quando  o  endereço  no  contador  de  programa  
+não  traduz).  O  registrador  scause  indica  o  tipo  de  falha  de  página  e  o  registrador  stval  contém  o  endereço  que  não  pôde  
+ser  traduzido.
+ O  plano  básico  em  uma  bifurcação  COW  é  que  o  pai  e  o  filho  compartilhem  inicialmente  todas  as  páginas  físicas,  mas  cada  um  
+mapeie-as  como  somente  leitura  (com  o  sinalizador  PTE_W  limpo).  Pai  e  filho  podem  ler  a  partir  da  memória  física  compartilhada.  Se  
+qualquer  um  deles  gravar  uma  determinada  página,  a  CPU  RISC-V  gera  uma  exceção  de  falha  de  página.  O  manipulador  de  traps  do  
+kernel  responde  alocando  uma  nova  página  de  memória  física  e  copiando  para  ela  a  página  física  para  a  qual  o  endereço  com  falha  
+mapeia.  O  kernel  altera  a  PTE  relevante  na  tabela  de  páginas  do  processo  com  falha  para  apontar  para  a  cópia  e  permitir  gravações,  
+bem  como  leituras,  e  então  retoma  o  processo  com  falha  na  instrução  que  causou  a  falha.  Como  a  PTE  permite  gravações,  a  instrução  
+reexecutada  agora  será  executada  sem  falhas.  A  cópia  na  gravação  requer  contabilidade  para  ajudar  a  decidir  quando  as  páginas  
+físicas  podem  ser  liberadas,  uma  vez  que  cada  página  pode  ser  referenciada  por  um  número  variável  de  tabelas  de  páginas,  
+dependendo  do  histórico  de  bifurcações,  falhas  de  página,  execuções  e  saídas.
+ Essa  contabilidade  permite  uma  otimização  importante:  se  um  processo  incorrer  em  uma  falha  de  página  de  armazenamento  e  a  
+página  física  for  referenciada  apenas  pela  tabela  de  páginas  desse  processo,  nenhuma  cópia  será  necessária.
+ A  cópia  na  gravação  torna  a  bifurcação  mais  rápida,  já  que  a  bifurcação  não  precisa  copiar  memória.  Parte  da  memória  precisará  
+ser  copiada  posteriormente,  quando  escrita,  mas  frequentemente  a  maior  parte  da  memória  nunca  precisa  ser  copiada.  Um  exemplo  
+comum  é  a  bifurcação  seguida  por  um  comando  exec:  algumas  páginas  podem  ser  escritas  após  a  bifurcação,  mas  o  comando  exec  
+da  filha  libera  a  maior  parte  da  memória  herdada  da  mãe.
+ A  bifurcação  copy-on-write  elimina  a  necessidade  de  copiar  essa  memória.  Além  disso,  a  bifurcação  COW  é  transparente:  nenhuma  
+modificação  nos  aplicativos  é  necessária  para  que  eles  se  beneficiem.
+ A  combinação  de  tabelas  de  páginas  e  falhas  de  página  abre  uma  ampla  gama  de  possibilidades  interessantes,  além  da  
+bifurcação  COW.  Outro  recurso  amplamente  utilizado  é  a  alocação  preguiçosa,  que  possui  duas  partes.  Primeiro,  quando  um  aplicativo  
+solicita  mais  memória  chamando  sbrk,  o  kernel  percebe  o  aumento  de  tamanho,  mas  não  aloca  memória  física  e  não  cria  PTEs  para  o  
+novo  intervalo  de  endereços  virtuais.  Segundo,  em  uma  falha  de  página  em  um  desses  novos  endereços,  o  kernel  aloca  uma  página  
+de  memória  física  e  a  mapeia  na  tabela  de  páginas.  Assim  como  a  bifurcação  COW,  o  kernel  pode  implementar
+ 49
+Machine Translated by Google
+ alocação  preguiçosa  de  forma  transparente  para  aplicativos.
+ Como  os  aplicativos  frequentemente  solicitam  mais  memória  do  que  precisam,  a  alocação  preguiçosa  é  vantajosa:  o  kernel  não  
+precisa  realizar  nenhum  trabalho  para  páginas  que  o  aplicativo  nunca  usa.  Além  disso,  se  o  aplicativo  solicitar  um  aumento  significativo  
+no  espaço  de  endereço,  o  sbrk  sem  alocação  preguiçosa  é  caro:  se  um  aplicativo  solicitar  um  gigabyte  de  memória,  o  kernel  precisa  
+alocar  e  zerar  262.144  páginas  de  4.096  bytes.  A  alocação  preguiçosa  permite  que  esse  custo  seja  distribuído  ao  longo  do  tempo.  
+Por  outro  lado,  a  alocação  preguiçosa  incorre  na  sobrecarga  extra  de  falhas  de  página,  que  envolvem  uma  transição  kernel/usuário.  
+Os  sistemas  operacionais  podem  reduzir  esse  custo  alocando  um  lote  de  páginas  consecutivas  por  falha  de  página  em  vez  de  uma  
+página  e  especializando  o  código  de  entrada/saída  do  kernel  para  tais  falhas  de  página.
+ Outro  recurso  amplamente  utilizado  que  explora  falhas  de  página  é  a  paginação  sob  demanda.  Em  exec,  o  xv6  carrega  todo  o  
+texto  e  os  dados  de  um  aplicativo  avidamente  na  memória.  Como  os  aplicativos  podem  ser  grandes  e  a  leitura  do  disco  é  cara,  esse  
+custo  inicial  pode  ser  perceptível  para  os  usuários:  quando  o  usuário  inicia  um  aplicativo  grande  a  partir  do  shell,  pode  levar  muito  
+tempo  até  que  ele  veja  uma  resposta.  Para  melhorar  o  tempo  de  resposta,  um  kernel  moderno  cria  a  tabela  de  páginas  para  o  espaço  
+de  endereço  do  usuário,  mas  marca  as  PTEs  das  páginas  como  inválidas.  Em  uma  falha  de  página,  o  kernel  lê  o  conteúdo  da  página  
+do  disco  e  o  mapeia  para  o  espaço  de  endereço  do  usuário.  Assim  como  o  COW  fork  e  a  alocação  preguiçosa,  o  kernel  pode  
+implementar  esse  recurso  de  forma  transparente  para  os  aplicativos.
+ Os  programas  em  execução  em  um  computador  podem  precisar  de  mais  memória  do  que  a  RAM  disponível  no  computador.
+ Para  lidar  com  a  situação  de  forma  elegante,  o  sistema  operacional  pode  implementar  a  paginação  em  disco.  A  ideia  é  armazenar  
+apenas  uma  fração  das  páginas  do  usuário  na  RAM  e  armazenar  o  restante  em  disco,  em  uma  área  de  paginação.  O  kernel  marca  
+as  PTEs  que  correspondem  à  memória  armazenada  na  área  de  paginação  (e,  portanto,  não  na  RAM)  como  inválidas.  Se  um  aplicativo  
+tentar  usar  uma  das  páginas  que  foram  paginadas  para  o  disco,  o  aplicativo  incorrerá  em  uma  falha  de  página  e  a  página  deverá  ser  
+paginada:  o  manipulador  de  traps  do  kernel  alocará  uma  página  de  RAM  física,  lerá  a  página  do  disco  para  a  RAM  e  modificará  a  
+PTE  relevante  para  apontar  para  a  RAM.
+ O  que  acontece  se  uma  página  precisar  ser  paginada,  mas  não  houver  RAM  física  livre?  Nesse  caso,  o  kernel  deve  primeiro  
+liberar  uma  página  física,  paginando-a  para  fora  ou  removendo-a  para  a  área  de  paginação  no  disco  e  marcando  as  PTEs  que  se  
+referem  a  essa  página  física  como  inválidas.  A  remoção  é  dispendiosa,  portanto,  a  paginação  tem  melhor  desempenho  se  for  pouco  
+frequente:  se  os  aplicativos  usarem  apenas  um  subconjunto  de  suas  páginas  de  memória  e  a  união  dos  subconjuntos  couber  na  
+RAM.  Essa  propriedade  é  frequentemente  chamada  de  boa  localidade  de  referência.  Assim  como  acontece  com  muitas  técnicas  de  
+memória  virtual,  os  kernels  geralmente  implementam  a  paginação  para  o  disco  de  forma  transparente  para  os  aplicativos.
+ Os  computadores  frequentemente  operam  com  pouca  ou  nenhuma  memória  física  livre,  independentemente  da  quantidade  de  
+RAM  fornecida  pelo  hardware.  Por  exemplo,  provedores  de  nuvem  multiplexam  muitos  clientes  em  uma  única  máquina  para  usar  
+seu  hardware  de  forma  econômica.  Outro  exemplo:  usuários  executam  muitos  aplicativos  em  smartphones  com  uma  pequena  
+quantidade  de  memória  física.  Em  tais  cenários,  a  alocação  de  uma  página  pode  exigir  a  remoção  prévia  de  uma  página  existente.  
+Portanto,  quando  a  memória  física  livre  é  escassa,  a  alocação  é  dispendiosa.
+ A  alocação  lenta  e  a  paginação  sob  demanda  são  particularmente  vantajosas  quando  a  memória  livre  é  escassa.
+ A  alocação  avida  de  memória  em  sbrk  ou  exec  incorre  no  custo  extra  de  remoção  para  disponibilizar  memória.  Além  disso,  existe  o  
+risco  de  que  o  trabalho  avidamente  realizado  seja  desperdiçado,  pois  antes  que  o  aplicativo  use  a  página,  o  sistema  operacional  pode  
+tê-la  removido.
+ Outros  recursos  que  combinam  exceções  de  paginação  e  falha  de  página  incluem  extensão  automática
+ pilhas  e  arquivos  mapeados  na  memória.
+ 50
+Machine Translated by Google
+ 4.7  Mundo  real
+ O  trampolim  e  o  trapframe  podem  parecer  excessivamente  complexos.  Uma  força  motriz  é  que  o  RISC-V  intencionalmente  
+faz  o  mínimo  possível  ao  forçar  uma  armadilha,  para  permitir  a  possibilidade  de  um  tratamento  muito  rápido  da  armadilha,  
+o  que  acaba  sendo  importante.  Como  resultado,  as  primeiras  instruções  do  manipulador  de  armadilhas  do  kernel  precisam  
+ser  executadas  efetivamente  no  ambiente  do  usuário:  a  tabela  de  páginas  do  usuário  e  o  conteúdo  do  registrador  do  
+usuário.  E  o  manipulador  de  armadilhas  inicialmente  ignora  fatos  úteis,  como  a  identidade  do  processo  em  execução  ou  o  
+endereço  da  tabela  de  páginas  do  kernel.  Uma  solução  é  possível  porque  o  RISC-V  fornece  locais  protegidos  nos  quais  o  
+kernel  pode  armazenar  informações  antes  de  entrar  no  espaço  do  usuário:  o  registrador  sscratch  e  as  entradas  da  tabela  
+de  páginas  do  usuário  que  apontam  para  a  memória  do  kernel,  mas  são  protegidas  pela  ausência  de  PTE_U.  O  trampolim  
+e  o  trapframe  do  Xv6  exploram  esses  recursos  do  RISC-V.
+ A  necessidade  de  páginas  especiais  de  trampolim  poderia  ser  eliminada  se  a  memória  do  kernel  fosse  mapeada  na  
+tabela  de  páginas  de  usuário  de  cada  processo  (com  os  sinalizadores  de  permissão  PTE  apropriados).  Isso  também  
+eliminaria  a  necessidade  de  uma  troca  de  tabela  de  páginas  ao  capturar  do  espaço  do  usuário  para  o  kernel.  Isso,  por  sua  
+vez,  permitiria  que  implementações  de  chamadas  de  sistema  no  kernel  aproveitassem  o  mapeamento  da  memória  de  
+usuário  do  processo  atual,  permitindo  que  o  código  do  kernel  desreferenciasse  diretamente  os  ponteiros  do  usuário.
+ Muitos  sistemas  operacionais  têm  usado  essas  ideias  para  aumentar  a  eficiência.  O  Xv6  as  evita  para  reduzir  as  chances  
+de  bugs  de  segurança  no  kernel  devido  ao  uso  inadvertido  de  ponteiros  de  usuário  e  para  reduzir  um  pouco  da  
+complexidade  necessária  para  garantir  que  os  endereços  virtuais  do  usuário  e  do  kernel  não  se  sobreponham.
+ Sistemas  operacionais  de  produção  implementam  bifurcação  de  cópia  na  gravação,  alocação  preguiçosa,  paginação  
+sob  demanda,  paginação  em  disco,  arquivos  mapeados  na  memória,  etc.  Além  disso,  sistemas  operacionais  de  produção  
+tentarão  usar  toda  a  memória  física,  seja  para  aplicativos  ou  caches  (por  exemplo,  o  cache  de  buffer  do  sistema  de  
+arquivos,  que  abordaremos  mais  adiante  na  Seção  8.2).  O  Xv6  é  ingênuo  nesse  aspecto:  você  quer  que  seu  sistema  
+operacional  use  a  memória  física  pela  qual  você  pagou,  mas  o  xv6  não.  Além  disso,  se  o  xv6  ficar  sem  memória,  ele  
+retorna  um  erro  para  o  aplicativo  em  execução  ou  o  encerra,  em  vez  de,  por  exemplo,  remover  uma  página  de  outro  
+aplicativo
