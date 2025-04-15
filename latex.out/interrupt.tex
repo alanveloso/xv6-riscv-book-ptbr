@@ -1,290 +1,534 @@
-%    Sidebar about panic:
-% 	panic is the kernel's last resort: the impossible has happened and the
-% 	kernel does not know how to proceed.  In xv6, panic does ...
-\chapter{Interrupts and device drivers}
-\label{CH:INTERRUPT}
-
-A
-\indextext{driver}
-is the code in an operating system that manages a particular device:
-it configures the device hardware,
-tells the device to perform operations,
-handles the resulting interrupts,
-and interacts with processes that may be waiting
-for I/O from the device.
-Driver code can be tricky
-because a driver executes concurrently with the device that it manages.  In
-addition, the driver must understand the device's hardware interface,
-which can be complex and poorly documented.
-
-Devices that need attention from the operating system can usually be
-configured to generate interrupts, which are one type of trap.
-The kernel trap handling code recognizes when a device
-has raised an interrupt and calls the driver's interrupt handler;
-
-Many device drivers execute code in two contexts: a \indextext{top
-half} that runs in a process's kernel thread, and a \indextext{bottom
-half} that executes at interrupt time. The top half
-is called via system calls such as {\tt read} and {\tt write} that want
-the device to perform I/O. This code may ask the hardware to start an
-operation (e.g., ask the disk to read a block); then the code waits for
-the operation to complete. Eventually the device completes the
-operation and raises an interrupt. The driver's interrupt handler,
-acting as the bottom half,
-figures out what operation has completed, wakes up a waiting
-process if appropriate, and tells the hardware to start work
-on any waiting next operation.
-
-\section{Code: Console input}
-
-The console driver \fileref{kernel/console.c}
-is a simple illustration of driver structure. The
-console driver accepts characters typed by a human, via the \indextext{UART}
-serial-port hardware attached to the RISC-V. The console driver accumulates a
-line of input at a time, processing special input characters such as
-backspace and control-u. User processes, such as the shell, use
-the {\tt read} system call to fetch lines of input from the console.
-When you type input to xv6 in QEMU, your keystrokes are delivered to
-xv6 by way of QEMU's simulated UART hardware.
-
-The UART hardware that the driver talks to is a 16550
-chip~\cite{ns16550a} emulated by QEMU. On a real computer, a 16550
-would manage an RS232 serial link connecting to a terminal or other
-computer. When running QEMU, it's connected to your keyboard and
-display.
-
-The UART hardware appears to software as a set of \indextext{memory-mapped}
-control registers. That is, there are some physical addresses that 
-RISC-V hardware connects to the UART device, so that loads and stores
-interact with the device hardware rather than RAM.
-The memory-mapped addresses for the UART start at 0x10000000, or {\tt UART0}
-There are a handful of UART control registers, each the width
-of a byte. Their offsets from {\tt UART0} are defined in
-{\tt LSR} register contains bits that indicate whether input
-characters are waiting to be read by the software. These
-characters (if any) are available for reading from the
-{\tt RHR} register. Each time one is read, the UART hardware
-deletes it from an internal FIFO of waiting characters, and
-clears the ``ready'' bit in {\tt LSR} when the FIFO is empty.
-The UART transmit hardware is largely independent of the receive
-hardware; if software writes a byte to the {\tt THR},
-the UART transmits that byte.
-
-Xv6's {\tt main} calls {\tt consoleinit}
-hardware. This code configures the UART to generate 
-a receive 
-interrupt when the UART receives each byte of input, and
-a \indextext{transmit complete} interrupt each time the
-
-The xv6 shell reads from the console by way of a file descriptor
-the {\tt read} system call make their way through the kernel to {\tt
-  consoleread} waits for input to arrive (via interrupts) and be
-buffered in {\tt cons.buf}, copies the input to user space, and (after
-a whole line has arrived) returns to the user process. If the user
-hasn't typed a full line yet, any reading processes will wait in the
-{\tt sleep} call
-(Chapter~\ref{CH:SCHED} explains the details of {\tt sleep}).
-
-When the user types a character, the UART hardware asks the RISC-V
-to raise an interrupt, which activates
-xv6's trap handler.
-The trap handler calls {\tt devintr}
-which looks at the RISC-V {\tt scause} register to discover that
-the interrupt is from an external device.
-Then it asks a hardware unit called the PLIC
-\cite{riscv:priv}
-to tell it which device interrupted
-If it was the UART, {\tt devintr} calls {\tt uartintr}.
-
-{\tt uartintr}
-reads any waiting input characters from the UART hardware
-and hands them to {\tt consoleintr}
-wait for characters, since future input will raise a new interrupt.
-The job of {\tt consoleintr} is to accumulate input characters in
-{\tt cons.buf} 
-until a whole line arrives.
-{\tt consoleintr} treats backspace and a few other characters
-specially.
-When a newline arrives, {\tt consoleintr} wakes up a
-waiting {\tt consoleread} (if there is one).
-
-Once woken, {\tt consoleread} will observe a full line in {\tt
-  cons.buf}, copy it to user space, and return (via the system call
-machinery) to user space.
-
-\section{Code: Console output}
-
-A {\tt write} system call on a file descriptor connected to the console
-eventually arrives at 
-{\tt uartputc}
-The device driver maintains an output buffer ({\tt uart\_tx\_buf})
-so that writing processes do not have to wait for the UART to finish
-sending; instead, {\tt uartputc} appends each character to the buffer,
-calls {\tt uartstart} to start the device transmitting (if it isn't
-already), and returns. The only situation in which {\tt uartputc}
-waits is if the buffer is already full.
-
-Each time the UART finishes sending a byte, it generates an interrupt.
-{\tt uartintr} calls {\tt uartstart}, which checks that the device
-really has finished sending, and hands the device the next buffered
-output character. Thus if a process writes multiple bytes to the
-console, typically the first byte will be sent by {\tt uartputc}'s
-call to {\tt uartstart}, and the remaining buffered bytes will be sent
-by {\tt uartstart} calls from {\tt uartintr} as transmit complete
-interrupts arrive.
-
-A general pattern to note is the decoupling of device activity from
-process activity via buffering and interrupts. The console driver can
-process input even when no process is waiting to read it; a subsequent
-read will see the input. Similarly, processes can send output without
-having to wait for the device. This decoupling can increase
-performance by allowing processes to execute concurrently with device
-I/O, and is particularly important when the device is slow (as with
-the UART) or needs immediate attention (as with echoing typed
-characters). This idea is sometimes called \indextext{I/O
-  concurrency}.
-
-\section{Concurrency in drivers}
-
-You may have noticed calls to {\tt acquire} in {\tt consoleread}
-and in {\tt consoleintr}. These calls acquire a lock, which protects
-the console driver's data structures from concurrent access.
-There are three concurrency dangers here: two processes on
-different CPUs might call {\tt consoleread} at the same time;
-the hardware might ask a CPU to deliver a console (really 
-UART) interrupt while that CPU is already executing inside
-{\tt consoleread};
-and the hardware might deliver a console interrupt on
-a different CPU while {\tt consoleread} is executing.
-Chapter~\ref{CH:LOCK} explains how to use locks
-to ensure that these dangers don't lead to incorrect results.
-
-Another way in which concurrency requires care in drivers is that one
-process may be waiting for input from a device, but the interrupt
-signaling arrival of the input may arrive when a different process (or
-no process at all) is running. Thus interrupt handlers are not allowed
-to think about the process or code that they have interrupted. For
-example, an interrupt handler cannot safely call {\tt copyout} with
-the current process's page table. Interrupt handlers typically do
-relatively little work (e.g., just copy the input data to a buffer),
-and wake up top-half code to do the rest.
-
-\section{Timer interrupts}
-
-Xv6 uses timer interrupts to maintain its idea of the
-current time and to switch among compute-bound processes. Timer
-interrupts come from clock hardware attached to each RISC-V CPU. Xv6
-programs each CPU's clock hardware to interrupt the CPU periodically.
-
-Code in {\tt start.c} 
-that allow supervisor-mode access to the timer control
-registers, and then asks for the first timer interrupt.
-The {\tt time} control register contains a count that the
-hardware increments at a steady rate; this serves as a
-notion of the current time. The {\tt stimecmp} register
-contains a time at which the the CPU will raise a timer
-interrupt; setting {\tt stimecmp} to the current value
-of {\tt time} plus {\it x} will schedule an interrupt
-{\it x} time units in the future. For {\tt qemu}'s RISC-V
-emulation, 1000000 time units is roughly a tenth of second.
-
-Timer interrupts arrive via {\tt usertrap} or {\tt kerneltrap}
-and {\tt devintr}, like other device interrupts.
-Timer interrupts arrive with {\tt scause}'s low bits set to
-five; {\tt devintr} in {\tt trap.c} detects this situation
-and calls {\tt clockintr}
-The latter function increments {\tt ticks},
-allowing the kernel to track the
-passage of time. The increment occurs on only one CPU, to avoid time
-passing faster if there are multiple CPUs.
-{\tt clockintr} wakes up any processes waiting in the {\tt sleep}
-system call,
-and schedules the next timer interrupt by writing
-{\tt stimecmp}.
-
-{\tt devintr} returns 2 for a timer interrupt
-in order to indicate to {\tt kerneltrap}
-or {\tt usertrap} that they should call {\tt yield} so that
-CPUs can be multiplexed among runnable processes.
-
-The fact that kernel code can be interrupted by a timer interrupt that
-forces a context switch via {\tt yield} is part of the reason why
-early code in {\tt usertrap} is careful to save state such as {\tt
-  sepc} before enabling interrupts. These context switches also mean
-that kernel code must be written in the knowledge that it may move
-from one CPU to another without warning.
-
-\section{Real world}
-
-Xv6, like many operating systems, allows interrupts and even context
-switches (via {\tt yield}) while executing in the kernel. The reason
-for this is to retain quick response times during complex system calls
-that run for a long time. However, as noted above, allowing interrupts
-in the kernel is the source of some complexity; as a result, a few
-operating systems allow interrupts only while executing user code.
-
-Supporting all the devices on a typical computer in its full glory is
-much work, because there are many devices, the devices have many
-features, and the protocol between device and driver can be complex
-and poorly documented. In many operating systems, the drivers account
-for more code than the core kernel.
-
-The UART driver retrieves data a byte at a time by reading the UART
-control registers; this pattern is called \indextext{programmed I/O}, since
-software is driving the data movement. Programmed I/O is simple, but
-too slow to be used at high data rates. Devices that need to move lots
-of data at high speed typically use \indextext{direct memory access (DMA)}.
-DMA device hardware directly writes incoming data to RAM, and reads
-outgoing data from RAM. Modern disk and network devices use DMA. A
-driver for a DMA device would prepare data in RAM, and then use a
-single write to a control register to tell the device to process the
-prepared data.
-
-Interrupts make sense when a device needs attention at unpredictable
-times, and not too often. But interrupts have high CPU overhead. Thus
-high speed devices, such as network and disk controllers, use tricks
-that reduce the need for interrupts. One trick is to raise a single
-interrupt for a whole batch of incoming or outgoing requests. Another
-trick is for the driver to disable interrupts entirely, and to check
-the device periodically to see if it needs attention. This technique
-is called \indextext{polling}. Polling makes sense if the device performs
-operations at a high rate, but it wastes CPU time if the device is mostly
-idle. Some drivers dynamically switch between polling and interrupts
-depending on the current device load.
-
-The UART driver copies incoming data first to a buffer in the kernel,
-and then to user space. This makes sense at low data rates, but such a
-double copy can significantly reduce performance for devices that
-generate or consume data very quickly. Some operating systems are able
-to directly move data between user-space buffers and device hardware,
-often with DMA.
-
-As mentioned in Chapter~\ref{CH:UNIX}, the console appears to
-applications as a regular file, and applications read input and write
-output using the \lstinline{read} and \lstinline{write} system calls.
-Applications may want to control aspects of a device that cannot be
-expressed through the standard file system calls (e.g.,
-enabling/disabling line buffering in the console driver).  Unix
-operating systems support the \lstinline{ioctl} system call for such
-cases.
-
-Some usages of computers require that the system must respond in a
-bounded time.  For example, in safety-critical systems missing a
-deadline can lead to disasters.  Xv6 is not suitable for hard
-real-time settings. Operating systems for hard real-time tend to be
-libraries that link with the application in a way that allows for an
-analysis to determine the worst-case response time.  Xv6 is also not
-suitable for soft real-time applications, when missing a deadline
-occasionally is acceptable, because xv6's scheduler is too simplistic and it has
-kernel code path where interrupts are disabled for a long time.
-
-\section{Exercises}
-
-\begin{enumerate}
-
-\item Modify {\tt uart.c} to not use interrupts at all. You may need
-to modify {\tt console.c} as well.
-
-\item Add a driver for an Ethernet card.
-
-\end{enumerate}
+ Capítulo  3
+ Tabelas  de  páginas
+ Tabelas  de  páginas  são  o  mecanismo  mais  popular  pelo  qual  o  sistema  operacional  fornece  a  cada  processo  seu  próprio  
+espaço  de  endereço  privado  e  memória.  Tabelas  de  páginas  determinam  o  significado  dos  endereços  de  memória  e  
+quais  partes  da  memória  física  podem  ser  acessadas.  Elas  permitem  que  o  xv6  isole  os  espaços  de  endereço  de  diferentes  
+processos  e  os  multiplexe  em  uma  única  memória  física.  Tabelas  de  páginas  são  um  design  popular  porque  fornecem  
+um  nível  de  indireção  que  permite  aos  sistemas  operacionais  realizarem  muitos  truques.  O  xv6  realiza  alguns  truques:  
+mapeia  a  mesma  memória  (uma  página  de  trampolim)  em  vários  espaços  de  endereço  e  protege  as  pilhas  do  kernel  e  do  
+usuário  com  uma  página  não  mapeada.  O  restante  deste  capítulo  explica  as  tabelas  de  páginas  que  o  hardware  RISC-V  
+fornece  e  como  o  xv6  as  utiliza.
+ 3.1  Hardware  de  paginação
+ Vale  lembrar  que  as  instruções  RISC-V  (tanto  de  usuário  quanto  de  kernel)  manipulam  endereços  virtuais.  A  RAM  da  
+máquina,  ou  memória  física,  é  indexada  com  endereços  físicos.  O  hardware  da  tabela  de  páginas  RISC-V  conecta  esses  
+dois  tipos  de  endereços,  mapeando  cada  endereço  virtual  a  um  endereço  físico.
+ 27
+ O  Xv6  roda  em  Sv39  RISC-V,  o  que  significa  que  apenas  os  39  bits  inferiores  de  um  endereço  virtual  de  64  bits  são  
+usados;  os  25  bits  superiores  não  são  usados.  Nesta  configuração  Sv39,  uma  tabela  de  páginas  RISC-V  é  logicamente  
+uma  matriz  de  2  (134.217.728)  entradas  de  tabela  de  páginas  (PTEs).  Cada  PTE  contém  um  número  de  página  física  
+(PPN)  de  44  bits  e  alguns  sinalizadores.  O  hardware  de  paginação  traduz  um  endereço  virtual  usando  os  27  bits  superiores  
+dos  39  bits  para  indexar  na  tabela  de  páginas  para  encontrar  um  PTE,  criando  um  endereço  físico  de  56  bits  cujos  44  bits  
+superiores  vêm  do  PPN  no  PTE  e  cujos  12  bits  inferiores  são  copiados  do  endereço  virtual  original.  A  Figura  3.1  mostra  
+esse  processo  com  uma  visão  lógica  da  tabela  de  páginas  como  uma  matriz  simples  de  PTEs  (veja  a  Figura  3.2  para  uma  
+história  mais  completa).  Uma  tabela  de  páginas  fornece  ao  sistema  operacional  controle  sobre  as  traduções  de  endereços  
+virtuais  para  físicos  na  granularidade  de  blocos  alinhados  de  4096  (212 )  bytes.  Esse  bloco  é  chamado  de  página.
+ 39
+ No  Sv39  RISC-V,  os  25  bits  superiores  de  um  endereço  virtual  não  são  usados  para  tradução.  O  endereço  físico  
+também  tem  espaço  para  crescimento:  no  formato  PTE,  há  espaço  para  que  o  número  de  páginas  físicas  aumente  em  
+mais  10  bits.  Os  projetistas  do  RISC-V  escolheram  esses  números  com  base  em  previsões  tecnológicas.  2  bytes  equivalem  
+a  512  GB,  o  que  deve  ser  espaço  de  endereço  suficiente  para  aplicativos  que  executam
+ 31
+Machine Translated by Google
+ Endereço  virtual
+ 25
+ 64
+ EXT
+ 27
+ Índice
+ 1
+ 0
+ 12
+ Desvio
+ 44
+ 10
+ Bandeiras  PPN
+ Tabela  de  páginas
+ 2^27
+ 56
+ 44
+ Endereço  físico
+ 12
+ Figura  3.1:  Endereços  virtuais  e  físicos  RISC-V,  com  uma  tabela  de  páginas  lógicas  simplificada.
+ 56
+ em  computadores  RISC-V.  2  é  espaço  de  memória  física  suficiente  para,  em  um  futuro  próximo,  acomodar  muitos  dispositivos  
+de  E/S  e  chips  DRAM.  Se  mais  for  necessário,  os  projetistas  do  RISC-V  definiram  Sv48  com  endereços  virtuais  de  48  bits  [3].
+ Como  mostra  a  Figura  3.2,  uma  CPU  RISC-V  traduz  um  endereço  virtual  em  um  físico  em  três  etapas.
+ Uma  tabela  de  páginas  é  armazenada  na  memória  física  como  uma  árvore  de  três  níveis.  A  raiz  da  árvore  é  uma  página  de  
+tabela  de  páginas  de  4.096  bytes  que  contém  512  PTEs,  que  contêm  os  endereços  físicos  das  páginas  da  tabela  de  páginas  no  
+próximo  nível  da  árvore.  Cada  uma  dessas  páginas  contém  512  PTEs  para  o  nível  final  da  árvore.
+ O  hardware  de  paginação  usa  os  9  bits  superiores  dos  27  bits  para  selecionar  uma  PTE  na  página  da  tabela  de  páginas  raiz,  os  
+9  bits  do  meio  para  selecionar  uma  PTE  em  uma  página  da  tabela  de  páginas  no  próximo  nível  da  árvore  e  os  9  bits  inferiores  
+para  selecionar  a  PTE  final.  (No  Sv48  RISC-V,  uma  tabela  de  páginas  tem  quatro  níveis,  e  os  bits  39  a  47  de  um  índice  de  
+endereço  virtual  no  nível  superior.)
+ Se  qualquer  um  dos  três  PTEs  necessários  para  traduzir  um  endereço  não  estiver  presente,  o  hardware  de  paginação
+ gera  uma  exceção  de  falha  de  página,  deixando  para  o  kernel  lidar  com  a  exceção  (veja  Capítulo  4).
+ A  estrutura  de  três  níveis  da  Figura  3.2  permite  uma  maneira  eficiente  de  gravar  PTEs  em  termos  de  memória,  em  
+comparação  com  o  design  de  nível  único  da  Figura  3.1.  No  caso  comum  em  que  grandes  intervalos  de  endereços  virtuais  não  
+têm  mapeamentos,  a  estrutura  de  três  níveis  pode  omitir  diretórios  de  páginas  inteiros.  Por  exemplo,  se  um  aplicativo  usa  
+apenas  algumas  páginas  começando  no  endereço  zero,  as  entradas  de  1  a  511  do  diretório  de  páginas  de  nível  superior  são  
+inválidas  e  o  kernel  não  precisa  alocar  páginas  para  os  511  diretórios  de  páginas  intermediárias.  Além  disso,  o  kernel  também  
+não  precisa  alocar  páginas  para  os  diretórios  de  páginas  de  nível  inferior  para  esses  511  diretórios  de  páginas  intermediárias.  
+Portanto,  neste  exemplo,  o  design  de  três  níveis  economiza  511  páginas  para  diretórios  de  páginas  intermediárias  e  511  ×  512  
+páginas  para  diretórios  de  páginas  de  nível  inferior.
+ Embora  uma  CPU  percorra  a  estrutura  de  três  níveis  no  hardware  como  parte  da  execução  de  uma  instrução  de  
+carregamento  ou  armazenamento,  uma  desvantagem  potencial  dos  três  níveis  é  que  a  CPU  deve  carregar  três  PTEs  da  
+memória  para  executar  a  tradução  do  endereço  virtual  na  instrução  de  carregamento/armazenamento  para  um  endereço  físico.
+ Para  evitar  o  custo  de  carregamento  de  PTEs  da  memória  física,  uma  CPU  RISC-V  armazena  em  cache  as  entradas  da  tabela  
+de  páginas  em  um  Translation  Look-aside  Buffer  (TLB).
+ 32
+Machine Translated by Google
+ Endereço  virtual
+ 9
+ EXT
+ 44
+ 511
+ 10
+ Bandeiras  PPN
+ 1
+ 511
+ L2
+ 44
+ L1
+ 10
+ Bandeiras  PPN
+ 0
+ satp
+ 63
+ Reservado
+ 1
+ Diretório  de  páginas
+ 53
+ 0
+ Diretório  de  páginas
+ 8910  07
+ Número  da  página  física
+ Endereço  físico
+ 9
+ 9
+ 12
+ Deslocamento  L0
+ 44
+ PPN
+ 12
+ Desvio
+ 44
+ 511
+ 10
+ Bandeiras  PPN
+ 1
+ 0
+ 6  5  4  3  
+Você
+ RSW
+ DUXR
+ G
+ UM
+ Diretório  de  páginas
+ 2 1
+ C
+ V
+ V
+ R
+ C
+ X
+ Você-  Válido-  Legível-  Gravável-  Executável-  Usuário-G  Global
+ A  -  Acessado
+ UM
+ D-  Acessado-  Sujo  (0  no  diretório  de  páginas)
+ Reservado  para  software  de  supervisão
+ Figura  3.2:  Detalhes  da  tradução  de  endereços  RISC-V.
+ Cada  PTE  contém  bits  de  sinalização  que  informam  ao  hardware  de  paginação  como  o  endereço  virtual  associado  
+pode  ser  usado.  PTE_V  indica  se  a  PTE  está  presente:  se  não  estiver  definida,  uma  referência  à  página  causa  uma  
+exceção  (ou  seja,  não  é  permitida).  PTE_R  controla  se  as  instruções  podem  ler  na  página.  PTE_W  controla  se  as  
+instruções  podem  gravar  na  página.  PTE_X  controla  se  a  CPU  pode  interpretar  o  conteúdo  da  página  como  instruções  
+e  executá-las.
+ PTE_U  controla  se  instruções  em  modo  usuário  têm  permissão  para  acessar  a  página;  se  PTE_U  não  estiver  definido,  
+o  PTE  só  poderá  ser  usado  em  modo  supervisor.  A  Figura  3.2  mostra  como  tudo  funciona.  Os  sinalizadores  e  todas  as  
+outras  estruturas  relacionadas  ao  hardware  da  página  são  definidos  em  (kernel/riscv.h).
+ Para  instruir  uma  CPU  a  usar  uma  tabela  de  páginas,  o  kernel  precisa  gravar  o  endereço  físico  da  página  raiz  da  
+tabela  de  páginas  no  registrador  satp.  Uma  CPU  traduzirá  todos  os  endereços  gerados  por  instruções  subsequentes  
+usando  a  tabela  de  páginas  apontada  por  seu  próprio  satp.  Cada  CPU  possui  seu  próprio  satp,  permitindo  que  
+diferentes  CPUs  executem  processos  diferentes,  cada  um  com  um  espaço  de  endereço  privado  descrito  por  sua  
+própria  tabela  de  páginas.
+ Normalmente,  um  kernel  mapeia  toda  a  memória  física  em  sua  tabela  de  páginas  para  que  possa  ler  e  escrever  
+em  qualquer  local  da  memória  física  usando  instruções  de  carregamento/armazenamento.  Como  os  diretórios  de  
+páginas  estão  na  memória  física,  o  kernel  pode  programar  o  conteúdo  de  uma  PTE  em  um  diretório  de  páginas  
+escrevendo  no  endereço  virtual  da  PTE  usando  uma  instrução  de  armazenamento  padrão.
+ Algumas  notas  sobre  termos.  Memória  física  refere-se  às  células  de  armazenamento  na  DRAM.  Um  byte  de  
+memória  física  possui  um  endereço,  chamado  endereço  físico.  As  instruções  usam  apenas  endereços  virtuais,  que  o  
+hardware  de  paginação  traduz  em  endereços  físicos  e,  em  seguida,  envia  ao  hardware  DRAM  para  leitura.
+ 33
+Machine Translated by Google
+ ou  armazenamento  de  gravação.  Ao  contrário  da  memória  física  e  dos  endereços  virtuais,  a  memória  virtual  não  é  um  espaço  físico
+ objeto,  mas  se  refere  à  coleção  de  abstrações  e  mecanismos  que  o  kernel  fornece  para  gerenciar
+ memória  física  e  endereços  virtuais.
+ Endereços  virtuais
+ MAXVA
+ PHYSTOP  
+(0x88000000)
+ BASE  DO  
+KERN  (0x80000000)
+ 0x10001000
+ 0x10000000
+ 0x0C000000
+ 0
+ Trampolim
+ Página  de  guarda
+ Kstack  0
+ Página  de  guarda
+ Kstack  1
+ ...
+ Memória  livre
+ Dados  do  kernel
+ Texto  do  kernel
+ Disco  VIRTIO
+ UART0
+ PLIC
+ Endereços  físicos
+ 2^56-1
+ Receita  médica--
+RW---
+RW
+RW
+RW
+Receita  médica
+ RW
+RW
+RW
+0x02000000
+ 0x1000
+ 0
+ Não  utilizado
+ Memória  física  (RAM)
+ Dispositivos  
+de  E/S  não  utilizados  e  outros
+ Disco  VIRTIO
+ UART0
+ PLIC
+ CLINT
+ Não  utilizado
+ ROM  de  inicialização
+ Não  utilizado
+ Figura  3.3:  À  esquerda,  o  espaço  de  endereço  do  kernel  do  xv6.  RWX  refere-se  a  leitura,  gravação  e  execução  de  PTE
+ permissões.  À  direita,  o  espaço  de  endereço  físico  RISC-V  que  o  xv6  espera  ver.
+ 3.2  Espaço  de  endereço  do  kernel
+ O  Xv6  mantém  uma  tabela  de  páginas  por  processo,  descrevendo  o  espaço  de  endereço  do  usuário  de  cada  processo,  além  de  
+uma  tabela  de  página  única  que  descreve  o  espaço  de  endereço  do  kernel.  O  kernel  configura  o  layout  do  seu  espaço  de  endereço  
+para  obter  acesso  à  memória  física  e  a  vários  recursos  de  hardware  em  intervalos  previsíveis.
+ Endereços  virtuais.  A  Figura  3.3  mostra  como  este  layout  mapeia  endereços  virtuais  do  kernel  para  endereços  físicos.  O  arquivo  
+(kernel/memlayout.h)  declara  as  constantes  para  o  layout  de  memória  do  kernel  do  xv6.
+ 34
+Machine Translated by Google
+ O  QEMU  simula  um  computador  que  inclui  RAM  (memória  física)  começando  no  endereço  físico  0x80000000  e  
+continuando  até  pelo  menos  0x88000000,  que  o  xv6  chama  de  PHYSTOP.
+ A  simulação  do  QEMU  também  inclui  dispositivos  de  E/S,  como  uma  interface  de  disco.  O  QEMU  expõe  as  interfaces  do  
+dispositivo  ao  software  como  registradores  de  controle  mapeados  na  memória,  localizados  abaixo  de  0x80000000  no  
+espaço  de  endereço  físico.  O  kernel  pode  interagir  com  os  dispositivos  lendo/escrevendo  esses  endereços  físicos  especiais;  
+tais  leituras  e  gravações  se  comunicam  com  o  hardware  do  dispositivo  em  vez  da  RAM.  O  Capítulo  4  explica  como  o  xv6  
+interage  com  os  dispositivos.
+ O  kernel  acessa  a  RAM  e  os  registradores  de  dispositivos  mapeados  na  memória  usando  "mapeamento  direto",  ou  
+seja,  mapeando  os  recursos  em  endereços  virtuais  iguais  ao  endereço  físico.  Por  exemplo,  o  próprio  kernel  está  localizado  
+em  KERNBASE=0x80000000  tanto  no  espaço  de  endereço  virtual  quanto  na  memória  física.  O  mapeamento  direto  
+simplifica  o  código  do  kernel  que  lê  ou  grava  na  memória  física.  Por  exemplo,  quando  o  fork  aloca  memória  do  usuário  
+para  o  processo  filho,  o  alocador  retorna  o  endereço  físico  dessa  memória;  o  fork  usa  esse  endereço  diretamente  como  
+um  endereço  virtual  ao  copiar  a  memória  do  usuário  do  processo  pai  para  o  filho.
+ Há  alguns  endereços  virtuais  do  kernel  que  não  são  mapeados  diretamente:
+ •  A  página  do  trampolim.  Ela  é  mapeada  no  topo  do  espaço  de  endereço  virtual;  as  tabelas  de  páginas  do  usuário  
+têm  esse  mesmo  mapeamento.  O  Capítulo  4  discute  o  papel  da  página  do  trampolim,  mas  vemos  aqui  um  caso  de  
+uso  interessante  de  tabelas  de  páginas;  uma  página  física  (contendo  o  código  do  trampolim)  é  mapeada  duas  
+vezes  no  espaço  de  endereço  virtual  do  kernel:  uma  vez  no  topo  do  espaço  de  endereço  virtual  e  outra  com  um  
+mapeamento  direto.
+ •  As  páginas  da  pilha  do  kernel.  Cada  processo  tem  sua  própria  pilha  do  kernel,  que  é  mapeada  em  uma  posição  alta  
+para  que,  abaixo  dela,  o  xv6  possa  deixar  uma  página  de  guarda  não  mapeada.  A  PTE  da  página  de  guarda  é  
+inválida  (ou  seja,  PTE_V  não  está  definida),  de  modo  que,  se  o  kernel  transbordar  uma  pilha  do  kernel,  
+provavelmente  causará  uma  exceção  e  o  kernel  entrará  em  pânico.  Sem  uma  página  de  guarda,  uma  pilha  
+transbordando  sobrescreveria  outra  memória  do  kernel,  resultando  em  operação  incorreta.  Uma  falha  de  pânico  é  preferível.
+ Embora  o  kernel  utilize  suas  pilhas  por  meio  de  mapeamentos  de  alta  memória,  elas  também  são  acessíveis  ao  
+kernel  por  meio  de  um  endereço  mapeado  diretamente.  Um  projeto  alternativo  poderia  ter  apenas  o  mapeamento  direto  
+e  usar  as  pilhas  no  endereço  mapeado  diretamente.  Nesse  arranjo,  no  entanto,  fornecer  páginas  de  guarda  envolveria  o  
+desmapeamento  de  endereços  virtuais  que,  de  outra  forma,  se  refeririam  à  memória  física,  o  que  dificultaria  o  uso.
+ O  kernel  mapeia  as  páginas  do  trampolim  e  o  texto  do  kernel  com  as  permissões  PTE_R  e  PTE_X.  O  kernel  lê  e  
+executa  instruções  dessas  páginas.  O  kernel  mapeia  as  outras  páginas  com  as  permissões  PTE_R  e  PTE_W,  para  que  
+possa  ler  e  gravar  na  memória  dessas  páginas.  Os  mapeamentos  para  as  páginas  de  guarda  são  inválidos.
+ 3.3  Código:  criando  um  espaço  de  endereço
+ A  maior  parte  do  código  xv6  para  manipular  espaços  de  endereço  e  tabelas  de  páginas  reside  em  vm.c  ( kernel/vm.c:1).  
+A  estrutura  de  dados  central  é  pagetable_t,  que  na  verdade  é  um  ponteiro  para  um  RISC-V
+ 35
+Machine Translated by Google
+ Tabela  de  páginas  raiz;  uma  pagetable_t  pode  ser  a  tabela  de  páginas  do  kernel  ou  uma  das  tabelas  de  páginas  por  
+processo.  As  funções  centrais  são  walk,  que  encontra  o  PTE  para  um  endereço  virtual,  e  mappages,  que  instala  PTEs  
+para  novos  mapeamentos.  Funções  que  começam  com  kvm  manipulam  a  tabela  de  páginas  do  kernel;  funções  que  
+começam  com  uvm  manipulam  uma  tabela  de  páginas  do  usuário;  outras  funções  são  usadas  para  ambos.  copyout  e  
+copyin  copiam  dados  de  e  para  endereços  virtuais  do  usuário  fornecidos  como  argumentos  de  chamada  de  sistema;  elas  
+estão  em  vm.c  porque  precisam  traduzir  explicitamente  esses  endereços  para  encontrar  a  memória  física  correspondente.
+ No  início  da  sequência  de  inicialização,  o  principal  chama  kvminit  (kernel/vm.c:54)  para  criar  a  tabela  de  páginas  do  
+kernel  usando  kvmmake  (kernel/vm.c:20).  Esta  chamada  ocorre  antes  que  o  xv6  habilite  a  paginação  no  RISC-V,  
+portanto,  os  endereços  se  referem  diretamente  à  memória  física.  O  kvmmake  primeiro  aloca  uma  página  de  memória  
+física  para  armazenar  a  página  da  tabela  de  páginas  raiz.  Em  seguida,  ele  chama  o  kvmmap  para  instalar  as  traduções  
+necessárias  ao  kernel.  As  traduções  incluem  as  instruções  e  os  dados  do  kernel,  a  memória  física  até  o  PHYSTOP  e  os  
+intervalos  de  memória  que,  na  verdade,  são  dispositivos.  proc_mapstacks  (kernel/proc.c:33)  aloca  uma  pilha  do  kernel  
+para  cada  processo.  Ele  chama  o  kvmmap  para  mapear  cada  pilha  no  endereço  virtual  gerado  pelo  KSTACK,  o  que  
+deixa  espaço  para  as  páginas  de  proteção  de  pilha  inválidas.
+ kvmmap  (kernel/vm.c:132)  chama  mappages  (kernel/vm.c:143),  que  instala  mapeamentos  em  uma  tabela  de  
+páginas  para  um  intervalo  de  endereços  virtuais  em  um  intervalo  correspondente  de  endereços  físicos.  Ele  faz  isso  
+separadamente  para  cada  endereço  virtual  no  intervalo,  em  intervalos  de  página.  Para  cada  endereço  virtual  a  ser  
+mapeado,  mappages  chama  walk  para  encontrar  o  endereço  da  PTE  correspondente  a  esse  endereço.  Em  
+seguida,  ele  inicializa  a  PTE  para  conter  o  número  da  página  física  relevante,  as  permissões  desejadas  (PTE_W,  
+PTE_X  e/ou  PTE_R)  e  PTE_V  para  marcar  a  PTE  como  válida  (kernel/vm.c:158).
+ andar  (kernel/vm.c:86)  imita  o  hardware  de  paginação  RISC-V  enquanto  procura  no  PTE  por  um  endereço  virtual  
+(veja  a  Figura  3.2).  O  comando  walk  desce  a  tabela  de  páginas  de  3  níveis  9  bits  por  vez.  Ele  usa  os  9  bits  de  endereço  
+virtual  de  cada  nível  para  encontrar  o  PTE  da  tabela  de  páginas  do  próximo  nível  ou  da  página  final  (kernel/vm.c:92).  Se  
+o  PTE  não  for  válido,  a  página  necessária  ainda  não  foi  alocada;  se  o  argumento  alloc  estiver  definido,  walk  aloca  uma  
+nova  página  da  tabela  de  páginas  e  insere  seu  endereço  físico  no  PTE.  Ele  retorna  o  endereço  do  PTE  na  camada  mais  
+baixa  da  árvore  (kernel/vm.c:102).
+ O  código  acima  depende  da  memória  física  ser  mapeada  diretamente  no  espaço  de  endereço  virtual  do  kernel.  Por  
+exemplo,  à  medida  que  o  walk  desce  níveis  da  tabela  de  páginas,  ele  extrai  o  endereço  (físico)  da  tabela  de  páginas  do  
+nível  seguinte  de  uma  PTE  (kernel/vm.c:94).  e  então  usa  esse  endereço  como  um  endereço  virtual  para  buscar  o  PTE  
+no  próximo  nível  abaixo  (kernel/vm.c:92).
+ chamadas  principais  kvminithart  (kernel/vm.c:62)  para  instalar  a  tabela  de  páginas  do  kernel.  Ele  grava  o  
+endereço  físico  da  página  raiz  da  tabela  de  páginas  no  registrador  satp.  Depois  disso,  a  CPU  traduzirá  os  
+endereços  usando  a  tabela  de  páginas  do  kernel.  Como  o  kernel  usa  um  mapeamento  de  identidade,  o  endereço  
+virtual  da  próxima  instrução  será  mapeado  para  o  endereço  de  memória  física  correto.
+ Cada  CPU  RISC-V  armazena  em  cache  as  entradas  da  tabela  de  páginas  em  um  Translation  Look-aside  Buffer  
+(TLB)  e,  quando  o  xv6  altera  uma  tabela  de  páginas,  deve  informar  à  CPU  para  invalidar  as  entradas  TLB  em  cache  
+correspondentes.  Caso  contrário,  em  algum  momento  posterior,  o  TLB  poderá  usar  um  mapeamento  em  cache  antigo,  
+apontando  para  uma  página  física  que,  nesse  meio  tempo,  foi  alocada  a  outro  processo  e,  como  resultado,  um  processo  
+poderá  rabiscar  na  memória  de  outro  processo.  O  RISC-V  possui  uma  instrução  sfence.vma  que  limpa  o  TLB  da  CPU  
+atual.  O  xv6  executa  sfence.vma  em  kvminithart  após  recarregar  o  registrador  satp  e  no  código  trampoline  que  alterna  
+para  um
+ 36
+Machine Translated by Google
+ tabela  de  página  do  usuário  antes  de  retornar  ao  espaço  do  usuário  (kernel/trampoline.S:89).
+ Também  é  necessário  emitir  sfence.vma  antes  de  alterar  o  satp,  para  aguardar  a  conclusão  de  todos  os  carregamentos  e  
+armazenamentos  pendentes.  Essa  espera  garante  que  as  atualizações  anteriores  na  tabela  de  páginas  tenham  sido  concluídas  e  
+que  os  carregamentos  e  armazenamentos  anteriores  usem  a  tabela  de  páginas  antiga,  não  a  nova.
+ um.
+ Para  evitar  a  limpeza  completa  do  TLB,  as  CPUs  RISC-V  podem  suportar  identificadores  de  espaço  de  endereço  
+(ASIDs)  [3].  O  kernel  pode  então  limpar  apenas  as  entradas  TLB  para  um  espaço  de  endereço  específico.  O  Xv6  não  
+utiliza  esse  recurso.
+ 3.4  Alocação  de  memória  física
+ O  kernel  deve  alocar  e  liberar  memória  física  em  tempo  de  execução  para  tabelas  de  páginas,  memória  do  usuário,  pilhas  do  kernel  
+e  buffers  de  pipe.
+ O  Xv6  utiliza  a  memória  física  entre  o  final  do  kernel  e  o  PHYSTOP  para  alocação  em  tempo  de  execução.  Ele  aloca  e  libera  
+páginas  inteiras  de  4.096  bytes  por  vez.  Ele  rastreia  quais  páginas  estão  livres,  encadeando  uma  lista  encadeada  entre  as  próprias  
+páginas.  A  alocação  consiste  em  remover  uma  página  da  lista  encadeada;  a  liberação  consiste  em  adicionar  a  página  liberada  à  
+lista.
+ 3.5  Código:  Alocador  de  memória  física
+ O  alocador  reside  em  kalloc.c  (kernel/kalloc.c:1).  A  estrutura  de  dados  do  alocador  é  uma  lista  livre  de  páginas  de  memória  física  
+disponíveis  para  alocação.  Cada  elemento  da  lista  de  páginas  livres  é  uma  execução  de  struct  (kernel/kalloc.c:17).  De  onde  o  
+alocador  obtém  a  memória  para  armazenar  essa  estrutura  de  dados?  Ele  armazena  a  estrutura  de  execução  de  cada  página  livre  
+na  própria  página  livre,  já  que  não  há  mais  nada  armazenado  lá.  A  lista  livre  é  protegida  por  um  bloqueio  de  spin  (kernel/
+ kalloc.c:21-24).  A  lista  e  o  bloqueio  são  encapsulados  em  uma  struct  para  deixar  claro  que  o  bloqueio  protege  os  campos  na  struct.  
+Por  enquanto,  ignore  o  bloqueio  e  as  chamadas  para  acquire  e  release;  o  Capítulo  6  examinará  o  bloqueio  em  detalhes.
+ A  função  main  chama  kinit  para  inicializar  o  alocador  (kernel/kalloc.c:27).  O  kinit  inicializa  a  lista  de  páginas  livres  para  
+armazenar  todas  as  páginas  entre  o  final  do  kernel  e  o  PHYSTOP.  O  Xv6  deve  determinar  quanta  memória  física  está  disponível  
+analisando  as  informações  de  configuração  fornecidas  pelo  hardware.  Em  vez  disso,  o  xv6  assume  que  a  máquina  possui  128  
+megabytes  de  RAM.  O  kinit  chama  o  freerange  para  adicionar  memória  à  lista  de  páginas  livres  por  meio  de  chamadas  por  página  
+ao  kfree.  Uma  PTE  só  pode  se  referir  a  um  endereço  físico  alinhado  em  um  limite  de  4096  bytes  (é  um  múltiplo  de  4096),  portanto,  
+o  freerange  usa  PGROUNDUP  para  garantir  que  libere  apenas  os  endereços  físicos  alinhados.  O  alocador  inicia  sem  memória;  
+essas  chamadas  ao  kfree  lhe  dão  algum  trabalho  para  gerenciar.
+ O  alocador  às  vezes  trata  endereços  como  inteiros  para  realizar  operações  aritméticas  com  eles  (por  exemplo,  percorrendo  
+todas  as  páginas  em  modo  livre)  e,  às  vezes,  usa  endereços  como  ponteiros  para  ler  e  escrever  na  memória  (por  exemplo,  
+manipulando  a  estrutura  de  execução  armazenada  em  cada  página);  esse  uso  duplo  de  endereços  é  o  principal  motivo  pelo  qual  o  
+código  do  alocador  está  cheio  de  conversões  de  tipo  em  C.  O  outro  motivo  é  que  a  liberação  e  a  alocação  alteram  inerentemente  o  
+tipo  de  memória.
+ 37
+Machine Translated by Google
+ A  função  kfree  (kernel/kalloc.c:47)  começa  definindo  cada  byte  na  memória  que  está  sendo  liberada  para  o  valor  1.  Isso  fará  
+com  que  o  código  que  usa  memória  após  liberá-la  (usa  “referências  pendentes”)  leia  lixo  em  vez  do  antigo  conteúdo  válido;  
+esperançosamente,  isso  fará  com  que  esse  código  quebre  mais  rápido.
+ Em  seguida,  kfree  anexa  a  página  à  lista  livre:  ele  converte  pa  para  um  ponteiro  para  struct  run,  registra  o  início  antigo  
+da  lista  livre  em  r->next  e  define  a  lista  livre  como  igual  a  r.  kalloc  remove  e  retorna  o  primeiro  elemento  na  lista  livre.
+ 3.6  Espaço  de  endereço  do  processo
+ Cada  processo  possui  uma  tabela  de  páginas  separada  e,  quando  o  xv6  alterna  entre  processos,  também  altera  as  
+tabelas  de  páginas.  A  Figura  3.4  mostra  o  espaço  de  endereço  de  um  processo  com  mais  detalhes  do  que  a  Figura  2.3.  
+A  memória  de  usuário  de  um  processo  começa  no  endereço  virtual  zero  e  pode  crescer  até  MAXVA  (kernel/riscv.h:360).  
+permitindo  que  um  processo  enderece  em  princípio  256  Gigabytes  de  memória.
+ O  espaço  de  endereço  de  um  processo  consiste  em  páginas  que  contêm  o  texto  do  programa  (que  o  xv6  mapeia  
+com  as  permissões  PTE_R,  PTE_X  e  PTE_U),  páginas  que  contêm  os  dados  pré-inicializados  do  programa,  uma  página  
+para  a  pilha  e  páginas  para  o  heap.  O  xv6  mapeia  os  dados,  a  pilha  e  o  heap  com  as  permissões  PTE_R,  PTE_W  e  
+PTE_U.
+ Usar  permissões  dentro  de  um  espaço  de  endereço  de  usuário  é  uma  técnica  comum  para  proteger  um  processo  de  usuário.
+ Se  o  texto  fosse  mapeado  com  PTE_W,  um  processo  poderia  modificar  acidentalmente  seu  próprio  programa;  por  exemplo,  um  
+erro  de  programação  pode  fazer  com  que  o  programa  escreva  em  um  ponteiro  nulo,  modificando  instruções  no  endereço  0,  e  
+então  continue  em  execução,  talvez  causando  mais  confusão.  Para  detectar  esses  erros  imediatamente,  o  xv6  mapeia  o  texto  
+sem  PTE_W;  se  um  programa  tentar  acidentalmente  armazenar  no  endereço  0,  o  hardware  se  recusará  a  executar  o  
+armazenamento  e  gerará  uma  falha  de  página  (consulte  a  Seção  4.6).
+ O  kernel  então  mata  o  processo  e  imprime  uma  mensagem  informativa  para  que  o  desenvolvedor  possa  rastrear  o  problema.
+ Da  mesma  forma,  ao  mapear  dados  sem  PTE_X,  um  programa  de  usuário  não  pode  pular  acidentalmente  para  um
+ endereço  nos  dados  do  programa  e  começar  a  executar  nesse  endereço.
+ No  mundo  real,  fortalecer  um  processo  por  meio  da  definição  cuidadosa  de  permissões  também  auxilia  na  defesa  contra  
+ataques  de  segurança.  Um  adversário  pode  fornecer  uma  entrada  cuidadosamente  construída  a  um  programa  (por  exemplo,  um  
+servidor  web)  que  acione  um  bug  no  programa  na  esperança  de  transformá-lo  em  um  exploit  [14].
+ Definir  permissões  cuidadosamente  e  outras  técnicas,  como  a  randomização  do  layout  do  espaço  de  endereço  do  usuário,  tornam  
+esses  ataques  mais  difíceis.
+ A  pilha  é  uma  única  página  e  é  exibida  com  o  conteúdo  inicial  criado  por  exec.  Strings  contendo  os  argumentos  da  linha  de  
+comando,  bem  como  um  array  de  ponteiros  para  eles,  ficam  no  topo  da  pilha.  Logo  abaixo,  estão  os  valores  que  permitem  que  
+um  programa  inicie  em  main  como  se  a  função  main(argc,  argv)  tivesse  acabado  de  ser  chamada.
+ Para  detectar  que  uma  pilha  de  usuário  está  transbordando  a  memória  alocada,  o  xv6  coloca  uma  página  de  guarda  
+inacessível  logo  abaixo  da  pilha,  limpando  o  sinalizador  PTE_U .  Se  a  pilha  de  usuário  transbordar  e  o  processo  tentar  usar  um  
+endereço  abaixo  da  pilha,  o  hardware  gerará  uma  exceção  de  falha  de  página  porque  a  página  de  guarda  está  inacessível  para  
+um  programa  em  execução  no  modo  de  usuário.  Um  sistema  operacional  real  pode,  em  vez  disso,  alocar  automaticamente  mais  
+memória  para  a  pilha  de  usuário  quando  ela  transborda.
+ Quando  um  processo  solicita  ao  xv6  mais  memória  do  usuário,  o  xv6  aumenta  o  heap  do  processo.  O  xv6  usa  primeiro
+ 38
+Machine Translated by Google
+ MAXVA
+ TAMANHO  DA  PÁGINA
+ Alinhamento  de  página
+ 0
+ Receita--
+estrutura  de  
+armadilha  de  trampolim
+ não  utilizado
+ monte
+ pilha
+ pilha  
+página  de  guarda
+ dados
+ não  utilizado
+ texto
+ RW-
+R-WU
+R-WU
+R-WU
+R-XU
+ argumento  0
+ ...
+ argumento  N  0
+ endereço  do  argumento  N
+ ...
+ endereço  do  argumento  0  
+endereço  do  endereço  do  
+argumento  0  
+argc  
+0xFFFFFFF
+ (vazio)
+ string  terminada  em  nulo  argv[argc]
+ argv[0]
+ argumento  argv  do  principal
+ argumento  argc  do  retorno  
+principal  PC  para  principal
+ Figura  3.4:  Espaço  de  endereço  de  usuário  de  um  processo,  com  sua  pilha  inicial.
+ kalloc  para  alocar  páginas  físicas.  Em  seguida,  ele  adiciona  PTEs  à  tabela  de  páginas  do  processo  que  apontam  para  
+as  novas  páginas  físicas.  O  Xv6  define  os  sinalizadores  PTE_W,  PTE_R,  PTE_U  e  PTE_V  nesses  PTEs.  A  maioria  
+dos  processos  não  utiliza  todo  o  espaço  de  endereço  do  usuário;  o  Xv6  deixa  PTE_V  livre  em  PTEs  não  utilizados.
+ Vemos  aqui  alguns  bons  exemplos  do  uso  de  tabelas  de  páginas.  Primeiro,  as  tabelas  de  páginas  de  diferentes  
+processos  traduzem  endereços  de  usuários  para  diferentes  páginas  de  memória  física,  de  modo  que  cada  processo  tenha  
+memória  de  usuário  privada.  Segundo,  cada  processo  vê  sua  memória  como  tendo  endereços  virtuais  contíguos  começando  
+em  zero,  enquanto  a  memória  física  do  processo  pode  ser  não  contígua.  Terceiro,  o  kernel  mapeia  uma  página  com  código  
+trampolim  no  topo  do  espaço  de  endereço  do  usuário  (sem  PTE_U),  portanto,  uma  única  página  de  memória  física  aparece  
+em  todos  os  espaços  de  endereço,  mas  pode  ser  usada  apenas  pelo  kernel.
+ 3.7  Código:  sbrk
+ sbrk  é  a  chamada  de  sistema  para  que  um  processo  reduza  ou  aumente  sua  memória.  A  chamada  de  sistema  é  
+implementada  pela  função  growproc  (kernel/proc.c:260).  growproc  chama  uvmalloc  ou  uvmdealloc,  dependendo  se  n  
+é  positivo  ou  negativo.  uvmalloc  (kernel/vm.c:226)  aloca  memória  física  com  kalloc  e  adiciona  PTEs  à  tabela  de  
+páginas  do  usuário  com  mappages.  uvmdealloc  chama  uvmunmap  (kernel/vm.c:171),  que  usa  walk  para  encontrar  
+PTEs  e  kfree  para  liberar  a  memória  física  à  qual  se  referem.
+ O  Xv6  usa  a  tabela  de  páginas  de  um  processo  não  apenas  para  informar  ao  hardware  como  mapear  os  endereços  
+virtuais  do  usuário,  mas  também  como  o  único  registro  de  quais  páginas  de  memória  física  são  alocadas  para  aquele  
+processo.  É  por  isso  que  a  liberação  de  memória  do  usuário  (no  uvmunmap)  requer  a  análise  da  tabela  de  páginas  do  usuário.
+ 39
+Machine Translated by Google
+ 3.8  Código:  exec
+ exec  é  uma  chamada  de  sistema  que  substitui  o  espaço  de  endereço  do  usuário  de  um  processo  por  dados  lidos  de  um  
+arquivo,  chamado  de  arquivo  binário  ou  executável.  Um  binário  normalmente  é  a  saída  do  compilador  e  do  vinculador  e  
+contém  instruções  de  máquina  e  dados  do  programa.  exec  (kernel/exec.c:23)  abre  o  caminho  binário  nomeado  usando  
+namei  (kernel/exec.c:36),  que  é  explicado  no  Capítulo  8.  Em  seguida,  ele  lê  o  cabeçalho  ELF.  Os  binários  Xv6  são  
+formatados  no  formato  ELF  amplamente  utilizado,  definido  em  (kernel/elf.h).  Um  binário  ELF  consiste  em  um  cabeçalho  
+ELF,  struct  elfhdr  (kernel/elf.h:6),  seguido  por  uma  sequência  de  cabeçalhos  de  seção  do  programa,  struct  proghdr  (kernel/
+ elf.h:25).  Cada  progvhdr  descreve  uma  seção  do  aplicativo  que  deve  ser  carregada  na  memória;  os  programas  xv6  têm  
+dois  cabeçalhos  de  seção  de  programa:  um  para  instruções  e  um  para  dados.
+ O  primeiro  passo  é  uma  verificação  rápida  para  verificar  se  o  arquivo  provavelmente  contém  um  binário  ELF.  Um  
+binário  ELF  começa  com  o  "número  mágico"  de  quatro  bytes  0x7F,  'E',  'L',  'F'  ou  ELF_MAGIC  (kernel/elf.h:3).  Se  o  
+cabeçalho  ELF  tiver  o  número  mágico  correto,  exec  assume  que  o  binário  está  bem  formado.
+ exec  aloca  uma  nova  tabela  de  páginas  sem  mapeamentos  de  usuários  com  proc_pagetable  (kernel/exec.c:49),
+ aloca  memória  para  cada  segmento  ELF  com  uvmalloc  (kernel/exec.c:65),  e  carrega  cada  segmento  na  memória  com  
+loadseg  (kernel/exec.c:10).  loadseg  usa  walkaddr  para  encontrar  o  endereço  físico  da  memória  alocada  na  qual  gravar  
+cada  página  do  segmento  ELF  e  readi  para  ler  o  arquivo.
+ O  cabeçalho  da  seção  do  programa  para /init,  o  primeiro  programa  de  usuário  criado  com  exec,  se  parece  com  isto:
+ #  objdump  -p  usuário/_init
+ usuário/_init:
+ Cabeçalho  do  programa:  
+0x70000003  off
+ CARREGAR  desligado
+ formato  de  arquivo  elf64-little
+ 0x00000000000006bb0  vaddr  0x0000000000000000
+ paddr  0x00000000000000000  align  2**0  filesz  0x000000000000004a  
+memsz  0x0000000000000000  sinalizadores  r-
+0x0000000000001000  vaddr  0x0000000000000000
+ paddr  0x00000000000000000  alinhar  2**12  arquivosz  0x0000000000001000  
+memsz  0x000000000001000  sinalizadores  rx
+ CARREGAR  desligado
+ 0x0000000000002000  vaddr  0x000000000001000
+ memsz  0x000000000000030  sinalizadores  rw
+EMPILHAMENTO  desligado
+ paddr  0x0000000000001000  alinhar  2**12  arquivosz  0x0000000000000010  
+0x00000000000000000  vaddr  0x000000000000000  paddr  0x0000000000000000  
+alinhar  2**4  arquivosz  0x0000000000000000  memsz  
+0x0000000000000000  sinalizadores  rw
+Vemos  que  o  segmento  de  texto  deve  ser  carregado  no  endereço  virtual  0x0  na  memória  (sem  permissões  de  
+gravação)  a  partir  do  conteúdo  no  deslocamento  0x1000  do  arquivo.  Também  vemos  que  os  dados  devem  ser  carregados  
+no  endereço  0x1000,  que  está  no  limite  de  uma  página,  e  sem  permissões  de  execução.
+ O  valor  "filesz"  do  cabeçalho  de  uma  seção  de  programa  pode  ser  menor  que  o  valor  "memsz",  indicando  que  o  
+espaço  entre  eles  deve  ser  preenchido  com  zeros  (para  variáveis  globais  em  C)  em  vez  de  lido  do  arquivo.  Para /init,  o  
+valor  "filesz"  de  dados  é  0x10  bytes  e  o  valor  "memsz"  é  0x30  bytes,  e,  portanto,  uvmalloc  aloca  memória  física  suficiente  
+para  armazenar  0x30  bytes,  mas  lê  apenas  0x10  bytes  do  arquivo /init.
+ 40
+Machine Translated by Google
+ Agora,  exec  aloca  e  inicializa  a  pilha  do  usuário.  Ele  aloca  apenas  uma  página  de  pilha.  exec  copia  as  strings  de  
+argumentos  para  o  topo  da  pilha,  uma  de  cada  vez,  registrando  os  ponteiros  para  elas  em  ustack.
+ Ele  coloca  um  ponteiro  nulo  no  final  do  que  será  a  lista  argv  passada  para  main.  As  três  primeiras  entradas  em  ustack  são  
+o  contador  de  programa  de  retorno  falso,  argc  e  o  ponteiro  argv .
+ O  comando  exec  coloca  uma  página  inacessível  logo  abaixo  da  página  da  pilha,  de  modo  que  programas  que  tentarem  
+usar  mais  de  uma  página  apresentarão  falhas.  Essa  página  inacessível  também  permite  que  o  comando  exec  trate  de  
+argumentos  muito  grandes;  nessa  situação,  a  cópia  (kernel/vm.c:352)  a  função  que  exec  usa  para  copiar  argumentos  para  
+a  pilha  notará  que  a  página  de  destino  não  está  acessível  e  retornará  -1.
+ Durante  a  preparação  da  nova  imagem  de  memória,  se  exec  detectar  um  erro,  como  um  segmento  de  programa  
+inválido,  ele  salta  para  o  rótulo  "bad",  libera  a  nova  imagem  e  retorna  -1.  exec  deve  aguardar  para  liberar  a  imagem  antiga  
+até  ter  certeza  de  que  a  chamada  de  sistema  será  bem-sucedida:  se  a  imagem  antiga  desaparecer,  a  chamada  de  sistema  
+não  poderá  retornar  -1  para  ela.  Os  únicos  casos  de  erro  em  exec  ocorrem  durante  a  criação  da  imagem.  Assim  que  a  
+imagem  estiver  concluída,  exec  pode  confirmar  a  nova  tabela  de  páginas  (kernel/exec.c:125).  e  liberar  o  antigo  (kernel/
+ exec.c:129).
+ exec  carrega  bytes  do  arquivo  ELF  para  a  memória  em  endereços  especificados  pelo  arquivo  ELF.  Usuários  ou  
+processos  podem  colocar  quaisquer  endereços  que  desejarem  em  um  arquivo  ELF.  Portanto,  exec  é  arriscado,  pois  os  
+endereços  no  arquivo  ELF  podem  se  referir  ao  kernel,  acidentalmente  ou  propositalmente.  As  consequências  para  um  
+kernel  desavisado  podem  variar  de  uma  falha  a  uma  subversão  maliciosa  dos  mecanismos  de  isolamento  do  kernel  (ou  
+seja,  uma  falha  de  segurança).  O  Xv6  realiza  uma  série  de  verificações  para  evitar  esses  riscos.  Por  exemplo,  if(ph.vaddr  
++  ph.memsz  <  ph.vaddr)  verifica  se  a  soma  excede  um  inteiro  de  64  bits.  O  perigo  é  que  um  usuário  possa  construir  um  
+binário  ELF  com  um  ph.vaddr  que  aponte  para  um  endereço  escolhido  pelo  usuário  e  um  ph.memsz  grande  o  suficiente  
+para  que  a  soma  exceda  para  0x1000,  o  que  parecerá  um  valor  válido.  Em  uma  versão  mais  antiga  do  xv6,  na  qual  o  
+espaço  de  endereço  do  usuário  também  continha  o  kernel  (mas  não  era  legível/gravável  no  modo  usuário),  o  usuário  podia  
+escolher  um  endereço  que  correspondesse  à  memória  do  kernel  e,  assim,  copiar  os  dados  do  binário  ELF  para  o  kernel.  
+Na  versão  RISC-V  do  xv6,  isso  não  acontece,  pois  o  kernel  tem  sua  própria  tabela  de  páginas;  loadseg  carrega  na  tabela  
+de  páginas  do  processo,  não  na  tabela  de  páginas  do  kernel.
+ É  fácil  para  um  desenvolvedor  de  kernel  omitir  uma  verificação  crucial,  e  kernels  do  mundo  real  têm  um  longo  histórico  
+de  verificações  ausentes,  cuja  ausência  pode  ser  explorada  por  programas  de  usuário  para  obter  privilégios  de  kernel.  É  
+provável  que  o  xv6  não  faça  um  trabalho  completo  de  validação  dos  dados  de  nível  de  usuário  fornecidos  ao  kernel,  o  que  
+um  programa  de  usuário  malicioso  pode  explorar  para  contornar  o  isolamento  do  xv6.
+ 3.9  Mundo  real
+ Como  a  maioria  dos  sistemas  operacionais,  o  xv6  usa  o  hardware  de  paginação  para  proteção  e  mapeamento  de  memória.
+ A  maioria  dos  sistemas  operacionais  faz  uso  muito  mais  sofisticado  de  paginação  do  que  o  xv6,  combinando  exceções  de  
+paginação  e  falha  de  página,  que  discutiremos  no  Capítulo  4.
+ O  Xv6  é  simplificado  pelo  uso,  pelo  kernel,  de  um  mapeamento  direto  entre  endereços  virtuais  e  físicos,  e  pela  
+suposição  de  que  há  RAM  física  no  endereço  0x8000000,  onde  o  kernel  espera  ser  carregado.  Isso  funciona  com  o  QEMU,  
+mas  em  hardware  real  acaba  sendo  uma  má  ideia;  o  hardware  real  coloca  RAM  e  dispositivos  em  endereços  físicos  
+imprevisíveis,  de  modo  que  (por  exemplo)  pode  não  haver  RAM  em  0x8000000,  onde  o  xv6  espera  poder  armazenar  o  
+kernel.  Um  kernel  mais  sério
+ 41
+Machine Translated by Google
+ os  projetos  exploram  a  tabela  de  páginas  para  transformar  layouts  arbitrários  de  memória  física  de  hardware  em  layouts  previsíveis  
+de  endereços  virtuais  do  kernel.
+ O  RISC-V  suporta  proteção  no  nível  de  endereços  físicos,  mas  o  xv6  não  usa  esse  recurso.
+ Em  máquinas  com  muita  memória,  pode  fazer  sentido  usar  o  suporte  do  RISC-V  para  "superpáginas".  Páginas  pequenas  
+fazem  sentido  quando  a  memória  física  é  pequena,  para  permitir  alocação  e  paginação  para  o  disco  com  granularidade  fina.  Por  
+exemplo,  se  um  programa  usa  apenas  8  quilobytes  de  memória,  atribuir  a  ele  uma  superpágina  inteira  de  4  megabytes  de  memória  
+física  é  um  desperdício.  Páginas  maiores  fazem  sentido  em  máquinas  com  muita  RAM  e  podem  reduzir  a  sobrecarga  na  manipulação  
+da  tabela  de  páginas.
+ A  falta  de  um  alocador  do  tipo  malloc  no  kernel  xv6  que  possa  fornecer  memória  para  objetos  pequenos  impede  que  o  kernel  
+use  estruturas  de  dados  sofisticadas  que  exigiriam  alocação  dinâmica.
+ Um  kernel  mais  elaborado  provavelmente  alocaria  muitos  tamanhos  diferentes  de  blocos  pequenos,  em  vez  de  (como  no  xv6)  
+apenas  blocos  de  4.096  bytes;  um  alocador  de  kernel  real  precisaria  lidar  com  alocações  pequenas  e  também  grandes.
+ A  alocação  de  memória  é  um  tópico  recorrente  e  polêmico,  cujos  problemas  básicos  são  o  uso  eficiente  de  memória  limitada  e  
+a  preparação  para  solicitações  futuras  desconhecidas  [9].  Hoje  em  dia,  as  pessoas  se  preocupam  mais  com  velocidade  do  que  com  
+eficiência  de  espaço.
