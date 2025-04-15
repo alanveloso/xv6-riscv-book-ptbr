@@ -1,912 +1,464 @@
-% talk a little about initial page table conditions:
-%     paging not on, but virtual mostly mapped direct to physical,
-%     which is what things look like when we turn paging on as well
-%     since paging is turned on after we create first process.
-%   mention why still have SEG_UCODE/SEG_UDATA?
-%   do we ever really say what the low two bits of %cs do?
-%     in particular their interaction with PTE_U
-%   sidebar about why it is extern char[]
-\chapter{Page tables}
-\label{CH:MEM}
-
-Page tables are the most popular mechanism through which the operating
-system provides each process with its own private address space and
-memory.  Page tables determine what memory addresses mean, and what
-parts of physical memory can be accessed. They allow xv6 to isolate
-different process's address spaces and to multiplex them onto a single
-physical memory. Page tables are a popular design because they provide
-a level of indirection that allow operating systems to perform many
-tricks. Xv6 performs a few tricks: mapping the same memory
-(a trampoline page) in several address spaces, and guarding kernel and
-user stacks with an unmapped page. The rest of this chapter explains
-the page tables that the RISC-V hardware provides and how xv6 uses
-them.
-
-%% 
-\section{Paging hardware}
-%% 
-As a reminder,
-RISC-V instructions (both user and kernel) manipulate virtual addresses.
-The machine's RAM, or physical memory, is indexed with physical
-addresses.
-The RISC-V page table hardware connects these two kinds of addresses,
-by mapping each virtual address to a physical address.
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.5]{fig/riscv_address.pdf}
-\caption{RISC-V virtual and physical addresses, with a simplified
-logical page table.}
-\label{fig:riscv_address}
-\end{figure}
-
-Xv6 runs on Sv39 RISC-V, which means that only the bottom 39
-bits of a 64-bit virtual address are used; the top 25 bits
-are not used.
-In this Sv39 configuration, a
-RISC-V page table is logically an array of $2^{27}$ (134,217,728)
-\indextext{page table entries (PTEs)}.  Each PTE contains a 44-bit
-physical page number (PPN) and some flags. The paging hardware
-translates a virtual address by using the top 27 bits of the 39 bits
-to index into the page table to find a PTE, and making a 56-bit
-physical address whose top 44 bits come from the PPN in the PTE
-and whose bottom 12 bits are copied from the original virtual address.
-Figure~\ref{fig:riscv_address} shows this
-process with a logical view of the page table as a simple array of PTEs
-(see Figure~\ref{fig:riscv_pagetable} for a fuller story).
-A page table
-gives the operating system control over virtual-to-physical address
-translations at the granularity of aligned chunks of 4096 ($2^{12}$)
-bytes.  Such a chunk is called a \indextext{page}.
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.5]{fig/riscv_pagetable.pdf}
-\caption{RISC-V address translation details.}
-\label{fig:riscv_pagetable}
-\end{figure}
-
-In Sv39 RISC-V, the top 25 bits of a virtual address are not used for
-translation. The physical address also has room for growth: there is
-room in the PTE format for the physical page number to grow by another
-10 bits.  The designers of RISC-V chose these numbers based on
-technology predictions.  $2^{39}$ bytes is 512 GB, which should be
-enough address space for applications running on RISC-V
-computers. $2^{56}$ is enough physical memory space for the near
-future to fit many I/O devices and RAM chips. If
-more is needed, the RISC-V designers have defined Sv48 with 48-bit
-virtual addresses~\cite{riscv:priv}.
-
-As 
-Figure~\ref{fig:riscv_pagetable} shows,
-a RISC-V CPU translates a virtual address into a physical in
-three steps.  A page table is stored
-in physical memory as a three-level tree.
-The root of the tree is a
-4096-byte page-table page that contains 512 PTEs, which contain the physical
-addresses for page-table pages in the next level of the tree.  Each of those
-pages contains 512 PTEs for the final level in the tree.  The paging
-hardware uses the top 9 bits of the 27 bits to select a PTE in the
-root page-table page, the middle 9 bits to select a PTE in a page-table page in the
-next level of the
-tree, and the bottom 9 bits to select the final PTE.
-(In Sv48 RISC-V a page table has four levels, and bits 39 through 47
-of a virtual address index into the top-level.)
-
-If any of the three PTEs required to translate an address
-is not present, the paging hardware raises a \indextext{page-fault exception}, leaving it up
-to the kernel to handle the exception (see Chapter~\ref{CH:TRAP}).
-
-The three-level structure of Figure~\ref{fig:riscv_pagetable} allows a
-memory-efficient way of recording PTEs, compared to the single-level
-design of Figure~\ref{fig:riscv_address}.  In the common case in which
-large ranges of virtual addresses have no mappings, the three-level
-structure can omit entire page directories.  For example, if an
-application uses only a few pages starting at address zero, then the
-entries 1 through 511 of the top-level page directory are invalid, and
-the kernel doesn't have to allocate pages those for 511 intermediate
-page directories.  Furthermore, the kernel also doesn't have to
-allocate pages for the bottom-level page directories for those 511
-intermediate page directories. So, in this example, the three-level
-design saves 511 pages for intermediate page directories and
-$511\times512$ pages for bottom-level page directories.
-
-Although a CPU walks the three-level structure in hardware as part of
-executing a load or store instruction, a potential downside of three
-levels is that the CPU must load three PTEs from memory to perform the
-translation of the virtual address in the load/store instruction to a
-physical address.  To avoid the cost of loading PTEs from physical
-memory, a RISC-V CPU caches page table entries in a
-\indextext{Translation Look-aside Buffer (TLB)}.
-
-Each PTE contains flag bits that tell the paging hardware
-how the associated virtual address is allowed to be used.
-\indexcode{PTE_V}
-indicates whether the PTE is present: if it is
-not set, a reference to the page causes an exception (i.e., is not allowed).
-\indexcode{PTE_R}
-controls whether instructions are allowed to 
-read to the page.
-\indexcode{PTE_W}
-controls whether instructions are allowed to 
-write to the page.
-\indexcode{PTE_X}
-controls whether the CPU may interpret the content
-of the page as instructions and execute them.
-\indexcode{PTE_U}
-controls whether instructions in user mode are allowed
-to access the page;
-if \indexcode{PTE_U} is not set, the PTE can be used only in supervisor mode.
-Figure~\ref{fig:riscv_pagetable}
-shows how it all works.
-The flags and all other page hardware-related structures are defined in
-\fileref{kernel/riscv.h}
-
-To tell a CPU to use a page table, the kernel must
-write the physical address of the root page-table page into the 
-\texttt{satp}\index{satp@\lstinline{satp}} register.
-A CPU will translate all addresses generated by subsequent instructions
-using the page table pointed to by its own \texttt{satp}.
-Each CPU has its own \texttt{satp} so that different CPUs can run
-different processes, each with a private address space described by
-its own page table.
-
-From the kernel's point of view, a page table is data stored in
-memory, and the kernel creates and modifies page tables using code
-much like you might see for any tree-shaped data structure.
-
-A few notes about terms used in this book. \textit{Physical memory}
-refers to storage cells in RAM. A byte of physical memory has an
-address, called a \textit{physical address}. Instructions that
-dereference addresses (such as loads, stores, jumps, and function calls)
-use only
-virtual addresses, which the paging hardware translates to physical
-addresses, and then sends to the RAM hardware to read or write
-storage. An \textit{address space} is the set of virtual addresses
-that are valid in a given page table; each xv6 process has a separate
-user address space, and the xv6 kernel has its own address space as
-well. \textit{User memory} refers to a process's user address space
-plus the physical memory that the page table allows the process to
-access. \textit{Virtual memory} refers to the ideas and techniques
-associated with managing page tables and using them to achieve goals
-such as isolation.
-
-\begin{figure}[h]
-\centering
- \includegraphics[scale=0.65]{fig/xv6_layout.pdf}
-\caption{On the left, xv6's kernel address space.
-{\sf \small{RWX}}
-refer to PTE read, write, and execute permissions.
-On the right, the RISC-V physical address space that
-xv6 expects to see.}
-\label{fig:xv6_layout}
-\end{figure}
-
-%% 
-\section{Kernel address space}
-%% 
-Xv6 maintains one page table per process, describing each
-process's user address space, plus a single page table
-that describes the kernel's address space.
-The kernel configures the layout of its address space to
-give itself
-access to physical memory and
-various hardware resources at predictable virtual addresses.
-Figure~\ref{fig:xv6_layout}
-shows how this layout maps
-kernel virtual addresses to physical addresses.  The file
-\fileref{kernel/memlayout.h}
-declares the constants for xv6's kernel memory layout.
-
-QEMU simulates a computer that includes RAM (physical memory) starting
-at physical address \texttt{0x80000000} and continuing through
-at least \texttt{0x88000000}, which xv6 calls \texttt{PHYSTOP}.
-The QEMU simulation also
-includes I/O devices
-such as a disk interface.
-QEMU exposes the device interfaces to software as
-\indextext{memory-mapped}
-control registers that sit below
-\texttt{0x80000000}
-in the physical address space.
-The kernel can interact with the devices by reading/writing
-these special physical addresses; such reads and writes communicate
-with the device hardware rather than with RAM.
-Chapter~\ref{CH:TRAP} explains
-how xv6 interacts with devices.
-
-The kernel gets at RAM and memory-mapped device registers
-using ``direct mapping;'' that is, mapping the resources at
-virtual addresses that are equal to the physical address.
-For
-example, the kernel itself is located at \lstinline{KERNBASE=0x80000000} in both
-the virtual address space and in physical memory.
-Direct mapping simplifies kernel code that reads or writes
-physical memory. For example, when \lstinline{fork}
-allocates user memory for the child process,
-the allocator returns the physical address of that memory;
-\lstinline{fork} uses that address directly as a virtual
-address when it is copying the parent's user memory to the child.
-
-There are a couple of kernel virtual
-addresses that aren't direct-mapped:
-
-\begin{itemize}
-  
-\item The trampoline page. It is mapped at the top of the virtual
-  address space; user page tables have this same mapping.
-  Chapter~\ref{CH:TRAP} discusses the role of the trampoline
-  page, but we see here an interesting use case of page tables; a
-  physical page (holding the trampoline code) is mapped twice in the
-  virtual address space of the kernel: once at top of the virtual
-  address space and once with a direct mapping.
-
-\item The kernel stack pages.  Each process has its own kernel stack,
-  which is mapped high so that below it xv6 can leave an unmapped \indextext{guard
-    page}.  The guard page's PTE is invalid (i.e.,
-  \lstinline{PTE_V} is not set), so that if the kernel overflows
-  a kernel stack, it will likely cause an exception and the kernel will panic.
-  Without a guard page an overflowing stack would overwrite other kernel memory,
-  resulting in incorrect operation. A panic crash is preferable.
-
-\end{itemize}
-
-While the kernel uses its stacks via the high-memory mappings, they
-are also accessible to the kernel through a direct-mapped address. An
-alternate design might have just the direct mapping, and use the
-stacks at the direct-mapped address. In that arrangement, however,
-providing guard pages would involve unmapping virtual addresses that
-would otherwise refer to physical memory, which would then be hard to
-use.
-
-The kernel maps the pages for the trampoline and the kernel text with
-the permissions
-\lstinline{PTE_R}
-and
-\lstinline{PTE_X}.
-The kernel reads and executes instructions from these pages.
-The kernel maps the other pages with the permissions
-\lstinline{PTE_R}
-and
-\lstinline{PTE_W},
-so that it can read and write the memory in those pages.
-The mappings for the guard pages are invalid.
-
-
-%% 
-\section{Code: creating an address space}
-%% 
-
-Most of the xv6 code for manipulating address spaces and
-page tables resides in {\tt vm.c}
-\lineref{kernel/vm.c}{1}.
-The central data structure is {\tt pagetable\_t}, which
-is really a pointer to a RISC-V root page-table page;
-a {\tt pagetable\_t} may be either the kernel
-page table, or one of the per-process page tables.
-The central functions are {\tt walk},
-which finds the PTE for a virtual address,
-and {\tt mappages}, which installs PTEs for new mappings.
-Functions starting with {\tt kvm} manipulate
-the kernel page table; functions starting with {\tt uvm}
-manipulate a user page table; other functions are
-used for both.
-{\tt copyout} and {\tt copyin} copy data to and from
-user virtual addresses provided as system call arguments;
-they are in {\tt vm.c} because they need to explicitly
-translate those addresses in order to find the corresponding
-physical memory.
-
-Early in the boot sequence,
-\indexcode{main}
-calls
-\indexcode{kvminit}
-to create the kernel's page table using
-\indexcode{kvmmake}
-This call occurs before xv6 has enabled paging on the RISC-V,
-so addresses refer directly to physical memory.
-\lstinline{kvmmake}
-first allocates a page of physical memory to hold the root page-table page.
-Then it calls
-\indexcode{kvmmap}
-to install the translations that the kernel needs.
-The translations include the kernel's
-instructions and data, physical memory up to
-\indexcode{PHYSTOP},
-and memory ranges which are actually devices.
-\indexcode{proc_mapstacks}
-allocates a kernel stack for each
-process. It calls \lstinline{kvmmap} to map each stack at the virtual address generated by
-\lstinline{KSTACK}, which leaves room for the invalid stack-guard
-pages.
-
-\indexcode{kvmmap} 
-calls
-\indexcode{mappages}
-which
-installs mappings into a page table
-for a range of virtual addresses to
-a corresponding range of physical addresses.
-It does this separately for each virtual address in the range,
-at page intervals.
-For each virtual address to be mapped,
-\lstinline{mappages}
-calls
-\indexcode{walk}
-to find the address of the PTE for that address.
-It then initializes the PTE to hold the relevant physical page
-number, the desired permissions 
-(\lstinline{PTE_W},
-\lstinline{PTE_X},
-and/or
-\lstinline{PTE_R}),
-and
-\lstinline{PTE_V}
-to mark the PTE as valid
-
-\indexcode{walk}
-mimics the RISC-V paging hardware as it
-looks up the PTE for a virtual address (see
-Figure~\ref{fig:riscv_pagetable}).
-\lstinline{walk}
-descends the page table one level at a time,
-using each level's 9 bits of virtual address to
-index into the relevant page directory page.
-At each level it finds either the PTE of the
-next level's page directory page, or the PTE of
-final page
-If a PTE in a first or second level page directory
-page isn't valid, then the required directory page
-hasn't yet been allocated;
-if the
-\lstinline{alloc}
-argument is set,
-\lstinline{walk}
-allocates a new page-table page and puts its physical address in the PTE.
-It returns the address of the PTE in the lowest layer in the tree
-
-The above code depends on physical memory being direct-mapped into the
-kernel virtual address space. For example, as \lstinline{walk} descends levels
-of the page table, it pulls the (physical) address of the
-and then uses that address as a
-virtual address to fetch the PTE at the next level down
-
-\indexcode{main}
-calls
-\indexcode{kvminithart}
-to install the kernel page table.
-It writes the physical address of the root page-table page
-into the register
-\texttt{satp}.
-After this the CPU will translate addresses using the kernel
-page table.  Since the kernel uses a direct mapping, the now
-virtual address of the next instruction will map to the right physical
-memory address.
-
-Each RISC-V CPU caches page table entries in a
-\indextext{Translation Look-aside Buffer (TLB)}, and when xv6 changes
-a page table, it must tell the CPU to invalidate corresponding
-cached TLB entries.  If it didn't,
-then at some point later the TLB might
-use an old cached mapping, pointing to a physical page that in the meantime
-has been allocated to another process, and as a result, a process
-might be able to scribble on some other process's memory.  The RISC-V
-has an instruction \indexcode{sfence.vma} that flushes
-the current CPU's TLB.
-Xv6 executes {\tt sfence.vma} in {\tt kvminithart}  after reloading the 
-\texttt{satp} register, and in the trampoline code that
-switches to a user page table before returning to user space
-
-It is also necessary to issue \texttt{sfence.vma} before changing
-\texttt{satp}, in order to wait for completion of all outstanding loads and
-stores. This wait ensures that preceding updates to the page table have
-completed, and ensures that preceding loads and stores use the old
-page table, not the new one.
-
-To avoid flushing the complete TLB, RISC-V CPUs may support address
-space identifiers (ASIDs)~\cite{riscv:priv}.  The kernel can then
-flush just the TLB entries for a particular address space. Xv6
-does not use this feature.
-
-\section{Physical memory allocation}
-
-The kernel must allocate and free physical memory at run-time for
-page tables,
-user memory,
-kernel stacks,
-and pipe buffers.
-
-Xv6 uses the physical memory between the end of the kernel and
-\indexcode{PHYSTOP}
-for run-time allocation. It allocates and frees whole 4096-byte pages
-at a time. It keeps track of which pages are free by threading a
-linked list through the pages themselves. Allocation consists of
-removing a page from the linked list; freeing consists of adding the
-freed page to the list.
-%% 
-\section{Code: Physical memory allocator}
-%% 
-
-The allocator resides in {\tt kalloc.c} \lineref{kernel/kalloc.c}{1}.
-The allocator's data structure is a
-\textit{free list}
-of physical memory pages that are available
-for allocation.
-Each free page's list element is a
-\indexcode{struct run}
-Where does the allocator get the memory
-to hold that data structure?
-It store each free page's
-\lstinline{run}
-structure in the free page itself,
-since there's nothing else stored there.
-The free list is
-protected by a spin lock
-The list and the lock are wrapped in a struct
-to make clear that the lock protects the fields
-in the struct.
-For now, ignore the lock and the calls to
-\lstinline{acquire}
-and
-\lstinline{release};
-Chapter~\ref{CH:LOCK} will examine
-locking in detail.
-
-The function
-\indexcode{main}
-calls
-\indexcode{kinit}
-to initialize the allocator
-\lstinline{kinit}
-initializes the free list to hold
-every page between the end of the kernel and {\tt PHYSTOP}.
-Xv6 ought to determine how much physical
-memory is available by parsing configuration information 
-provided by the hardware.
-Instead xv6 assumes that the machine has
-128 megabytes of RAM.
-\lstinline{kinit}
-calls
-\indexcode{freerange}
-to add memory to the free list via per-page calls to
-\indexcode{kfree}.
-A PTE can only refer to a physical address that is aligned
-on a 4096-byte boundary (is a multiple of 4096), so
-\lstinline{freerange}
-uses
-\indexcode{PGROUNDUP}
-to ensure that it frees only aligned physical addresses.
-The allocator starts with no memory;
-these calls to
-\lstinline{kfree}
-give it some to manage.
-
-The allocator sometimes treats addresses as integers
-in order to perform arithmetic on them (e.g.,
-traversing all pages in
-\lstinline{freerange}),
-and sometimes uses addresses as pointers to read and
-write memory (e.g., manipulating the
-\lstinline{run}
-structure stored in each page);
-this dual use of addresses is the main reason that the
-allocator code is full of C type casts.
-\index{type cast}
-
-The function
-\lstinline{kfree}
-begins by setting every byte in the
-memory being freed to the value 1.
-This will cause code that uses memory after freeing it
-(uses ``dangling references'')
-to read garbage instead of the old valid contents;
-hopefully that will cause such code to break faster.
-Then
-\lstinline{kfree}
-prepends the page to the free list:
-it casts
-\lstinline{pa}
-to a pointer to
-\lstinline{struct}
-\lstinline{run},
-records the old start of the free list in
-\lstinline{r->next},
-and sets the free list equal to
-\lstinline{r}.
-\indexcode{kalloc}
-removes and returns the first element in the free list.
-
-\section{Process address space}
-
-Each process has its own page table, and when xv6 switches between
-processes, it also changes page tables.
-Figure~\ref{fig:processlayout} shows a process's address space in more
-detail than Figure~\ref{fig:as}.  A process's user memory starts at
-virtual address zero and can grow up to \texttt{MAXVA}
-principle 256 Gigabytes of memory.
-
-A process's address space consists of pages that contain the text of
-the program (which xv6 maps with the permissions \lstinline{PTE_R},
-\lstinline{PTE_X}, and \lstinline{PTE_U}), pages that contain the
-pre-initialized data of the program, a page for the stack, and pages
-for the heap.  Xv6 maps the data, stack, and heap with the permissions
-\lstinline{PTE_R}, \lstinline{PTE_W}, and \lstinline{PTE_U}.
-
-Using permissions within a user address space is a common technique to
-harden a user process.  If the text were mapped with
-\lstinline{PTE_W}, then a process could accidentally modify its own
-program; for example, a programming error may cause the program to
-write to a null pointer, modifying instructions at address 0, and then
-continue running, perhaps creating more havoc.  To detect such errors
-immediately, xv6 maps the text without \lstinline{PTE_W}; if a program
-accidentally attempts to store to address 0, the hardware will refuse
-to execute the store and raises a page fault (see
-Section~\ref{sec:pagefaults}).  The kernel then kills the process and
-prints out an informative message so that the developer can track down
-the problem.
-
-Similarly, by mapping data without \lstinline{PTE_X}, a user program
-cannot accidentally jump to an address in the program's data and start
-executing at that address.
-
-In the real world, hardening a process by setting permissions
-carefully also aids in defending against security attacks.  An
-adversary may feed carefully-constructed input to a program (e.g., a
-Web server) that triggers a bug in the program in the hope of turning
-that bug into an exploit~\cite{aleph:smashing}.  Setting permissions
-carefully and other techniques, such as randomizing of the layout of the
-user address space, make such attacks harder.
-
-The stack is a single page, and is shown with the initial contents as
-created by exec.  Strings containing the command-line arguments, as
-well as an array of pointers to them, are at the very top of the
-stack.  Just under that are values that allow a program to start at
-\lstinline{main} as if the function \lstinline{main(argc},
-\lstinline{argv)} had just been called.
-
-To detect a user stack overflowing the allocated stack memory, xv6
-places an inaccessible guard page right below the stack by clearing
-the \lstinline{PTE_U} flag. If the user stack overflows and the
-process tries to use an address below the stack, the hardware will
-generate a page-fault exception because the guard page is inaccessible
-to a program running in user mode. A real-world operating system might
-instead automatically allocate more memory for the user stack when it
-overflows.
-
-When a process asks xv6 for more user memory, xv6 grows the process's
-heap. Xv6 first uses {\tt kalloc} to allocate physical pages.
-It then adds PTEs to the process's page table that point
-to the new physical pages.
-Xv6 sets the
-\lstinline{PTE_W},
-\lstinline{PTE_R},
-\lstinline{PTE_U},
-and
-\lstinline{PTE_V}
-flags in these PTEs.
-Most processes do not use the entire user address space;
-xv6 leaves
-\lstinline{PTE_V}
-clear in unused PTEs.
-
-We see here a few nice examples of use of page tables.  First,
-different processes' page tables translate user addresses to different
-pages of physical memory, so that each process has private user
-memory.  Second, each process sees its memory as having contiguous
-virtual addresses starting at zero, while the process's physical
-memory can be non-contiguous.  Third, the kernel maps a page with
-trampoline code at the top of the user address space (without
-\lstinline{PTE_U}), thus a single page of physical memory shows up in
-all address spaces, but can be used only by the kernel.
-
-\begin{figure}[t]
-\center
-\includegraphics[scale=0.5]{fig/processlayout.png}
-\caption{A process's user address space, with its initial stack.}
-\label{fig:processlayout}
-\end{figure}
-
-\section{Code: sbrk}
-
-\lstinline{sbrk}
-is the system call for a process to shrink or grow its memory. The system
-call is implemented by the function
-\lstinline{growproc}
-\lstinline{growproc} calls \lstinline{uvmalloc} or
-\lstinline{uvmdealloc}, depending on whether \lstinline{n} is positive
-or negative.
-\lstinline{uvmalloc}
-allocates physical memory with {\tt kalloc}, zeros the allocated memory,
-and adds PTEs to the user page table with {\tt mappages}.
-\lstinline{uvmdealloc} calls
-{\tt uvmunmap}
-which uses {\tt walk} to find PTEs and
-{\tt kfree} to free the physical memory they refer to.
-
-Xv6 uses a process's page table not just to tell the hardware how to
-map user virtual addresses, but also as the only record of which
-physical memory pages are allocated to that process. That is the
-reason why freeing user memory (in {\tt uvmunmap}) requires
-examination of the user page table.
-
-%% 
-\section{Code: exec}
-%% 
-\lstinline{exec} is a system call that replaces a process's
-user address space with data read from a file, called a binary
-or executable file.
-A binary is typically the output of the compiler and linker,
-and holds machine instructions and program data.
-named binary \lstinline{path} using \indexcode{namei}
-Chapter~\ref{CH:FS}.  Then, it reads the ELF header. Xv6 binaries
-are formatted in the widely-used \indextext{ELF format}, defined in
-\fileref{kernel/elf.h}.  An ELF binary consists of an ELF header,
-followed by a sequence of program section headers,
-\lstinline{progvhdr} describes a section of the application that must
-be loaded into memory; xv6 programs have two program section
-headers: one for instructions and one for data.
-
-The first step is a quick check that the file probably contains an
-ELF binary.
-An ELF binary starts with the four-byte ``magic number''
-\lstinline{0x7F},
-\lstinline{`E'},
-\lstinline{`L'},
-\lstinline{`F'},
-or
-\indexcode{ELF_MAGIC}
-If the ELF header has the right magic number,
-\lstinline{exec}
-assumes that the binary is well-formed.
-
-\lstinline{exec}
-allocates a new page table with no user mappings with
-\indexcode{proc_pagetable}
-allocates memory for each ELF segment with
-\indexcode{uvmalloc}
-and loads each segment into memory with
-\indexcode{loadseg}
-\lstinline{loadseg}
-uses
-\indexcode{walkaddr}
-to find the physical address of the allocated memory at which to write
-each page of the ELF segment, and
-\indexcode{readi}
-to read from the file.
-
-The program section header for
-\indexcode{/init},
-the first user program created with
-\lstinline{exec},
-looks like this:
-\begin{footnotesize}
-\begin{verbatim}
-# objdump -p user/_init
-
-user/_init:     file format elf64-little
-
-Program Header:
-0x70000003 off    0x0000000000006bb0 vaddr 0x0000000000000000
-                                       paddr 0x0000000000000000 align 2**0
-         filesz 0x000000000000004a memsz 0x0000000000000000 flags r--
-    LOAD off    0x0000000000001000 vaddr 0x0000000000000000
-                                       paddr 0x0000000000000000 align 2**12
-         filesz 0x0000000000001000 memsz 0x0000000000001000 flags r-x
-    LOAD off    0x0000000000002000 vaddr 0x0000000000001000
-                                       paddr 0x0000000000001000 align 2**12
-         filesz 0x0000000000000010 memsz 0x0000000000000030 flags rw-
-   STACK off    0x0000000000000000 vaddr 0x0000000000000000
-                                       paddr 0x0000000000000000 align 2**4
-         filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
-\end{verbatim}
-\end{footnotesize}
-
-We see that the text segment should be loaded at virtual address 0x0
-in memory (without write permissions) from content at offset
-0x1000 in the file. We also see that the data should be loaded at
-address 0x1000, which is at a page boundary, and without executable
-permissions.
-
-A program section header's
-\lstinline{filesz}
-may be less than the
-\lstinline{memsz},
-indicating that the gap between them should be filled
-with zeroes (for C global variables) rather than read from the file.
-For
-\lstinline{/init}, the data
-\lstinline{filesz}
-is 0x10 bytes and
-\lstinline{memsz}
-is 0x30 bytes,
-and thus
-\indexcode{uvmalloc}
-allocates enough physical memory to hold 0x30 bytes, but reads only 0x10 bytes
-from the file
-\lstinline{/init}.
-
-Now
-\indexcode{exec}
-allocates and initializes the user stack.
-It allocates just one stack page.
-\lstinline{exec}
-copies the argument strings to the top of the stack
-one at a time, recording the pointers to them in
-\indexcode{ustack}.
-It places a null pointer at the end of what will be the
-\indexcode{argv}
-list passed to
-\lstinline{main}.
-The values for \indexcode{argc} and \lstinline{argv} are passed to \lstinline{main}
-through the system-call return path:  \lstinline{argc} is passed via the
-system call return value, which goes in {\tt a0}, and \lstinline{argv} is passed through
-the {\tt a1} entry of the process's trapframe.
-
-\lstinline{exec}
-places an inaccessible page just below the stack page,
-so that programs that try to use more than one page will fault.
-This inaccessible page also allows
-\lstinline{exec}
-to deal with arguments that are too large;
-in that situation,
-the
-\indexcode{copyout}
-function that
-\lstinline{exec}
-uses to copy arguments to the stack will notice that
-the destination page is not accessible, and will
-return -1.
-
-During the preparation of the new memory image,
-if
-\lstinline{exec}
-detects an error like an invalid program segment,
-it jumps to the label
-\lstinline{bad},
-frees the new image,
-and returns -1.
-\lstinline{exec}
-must wait to free the old image until it
-is sure that the system call will succeed:
-if the old image is gone,
-the system call cannot return -1 to it.
-The only error cases in
-\lstinline{exec}
-happen during the creation of the image.
-Once the image is complete,
-\lstinline{exec}
-can commit to the new page table
-and free the old one
-
-\lstinline{exec}
-loads bytes from the ELF file into memory at addresses specified by the ELF file.
-Users or processes can place whatever addresses they want into an ELF file.
-Thus
-\lstinline{exec}
-is risky, because the addresses in the ELF file may refer to the kernel, accidentally
-or on purpose. The consequences for an unwary kernel could range from
-a crash to a malicious subversion of the kernel's isolation mechanisms
-(i.e., a security exploit).
-Xv6 performs a number of checks to avoid these risks.
-For example
-\lstinline{if(ph.vaddr + ph.memsz < ph.vaddr)}
-checks for whether the sum overflows a 64-bit integer.
-The danger is that a user could construct an ELF binary with a
-\lstinline{ph.vaddr}
-that points to a user-chosen address,
-and
-\lstinline{ph.memsz}
-large enough that the sum overflows to 0x1000, which will look like a
-valid value. In an older version of xv6 in which the user address
-space also contained the kernel (but not readable/writable in user
-mode), the user could choose an address that corresponded to kernel
-memory and would thus copy data from the ELF binary into the kernel.
-In the RISC-V version of xv6 this cannot happen, because the kernel has
-its own separate page table;
-\lstinline{loadseg}
-loads into the process's page table, not in the kernel's page table.
-
-It is easy for a kernel developer to omit a crucial check, and
-real-world kernels have a long history of missing checks whose absence
-can be exploited by user programs to obtain kernel privileges.  It is likely that xv6 doesn't do a complete job of validating
-user-level data supplied to the kernel, which a malicious user program might be able to exploit to circumvent xv6's isolation.
-%% 
-\section{Real world}
-%% 
-
-Like most operating systems, xv6 uses the paging hardware for memory
-protection and mapping.  Most operating systems make far more
-sophisticated use of paging than xv6 by combining paging and
-page-fault exceptions, which we will discuss in
-Chapter~\ref{CH:TRAP}.
-
-Xv6 is simplified by the kernel's use of a direct map between virtual
-and physical addresses, and by its assumption that there is physical
-RAM at address 0x80000000, where the kernel expects to be loaded. This
-works with QEMU, but on real hardware it turns out to be a bad idea;
-real hardware places RAM and devices at unpredictable physical
-addresses, so that (for example) there might be no RAM at 0x80000000,
-where xv6 expect to be able to store the kernel. More serious kernel
-designs exploit the page table to turn arbitrary hardware physical
-memory layouts into predictable kernel virtual address layouts.
-
-RISC-V supports protection at the level of physical addresses,
-but xv6 doesn't use that feature.
-
-On machines with lots of memory
-it might make sense to use
-RISC-V's support for ``super pages.''
-Small pages make sense
-when physical memory is small, to allow allocation and page-out to disk
-with fine granularity.
-For example, if a program
-uses only 8 kilobytes of memory, giving it a whole 4-megabyte super-page
-of physical memory is wasteful.
-Larger pages make sense on machines with lots of RAM,
-and may reduce overhead for page-table manipulation.
-
-The xv6 kernel's lack of a {\tt malloc}-like allocator that can
-provide memory for small objects prevents the kernel from using
-sophisticated data structures that would require dynamic allocation.
-A more elaborate kernel
-would likely allocate many different sizes of small blocks,
-rather than (as in xv6) just 4096-byte blocks;
-a real kernel
-allocator would need to handle small allocations as well as large
-ones.
-
-Memory allocation is a perennial hot topic, the basic problems being
-efficient use of limited memory and
-preparing for unknown future requests~\cite{knuth}.  Today people care more about speed than
-space efficiency.
-%% 
-\section{Exercises}
-%% 
-
-\begin{enumerate}
-  
-\item Parse RISC-V's device tree to find the amount of physical memory
-the computer has.
-
-\item Write a user program that grows its address space by one byte by calling
-\lstinline{sbrk(1)}.
-Run the  program and investigate the page table for the program before the call
-to
-\lstinline{sbrk}
-and after the call to
-\lstinline{sbrk}.
-How much space has the kernel allocated?  What does the
-PTE
-for the new memory contain?
-
-\item Modify xv6 to use super pages for the kernel.
-
-\item Unix implementations of
-\lstinline{exec}
-traditionally include special handling for shell scripts.
-If the file to execute begins with the text
-\lstinline{#!},
-then the first line is taken to be a program
-to run to interpret the file.
-For example, if
-\lstinline{exec}
-is called to run
-\lstinline{myprog}
-\lstinline{arg1}
-and
-\lstinline{myprog} 's
-first line is
-\lstinline{#!/interp},
-then
-\lstinline{exec}
-runs
-\lstinline{/interp}
-with command line
-\lstinline{/interp}
-\lstinline{myprog}
-\lstinline{arg1}.
-Implement support for this convention in xv6.
-
-\item Implement address space layout randomization for the kernel.
-
-\end{enumerate}
+ Capítulo  6
+ Bloqueio
+ A  maioria  dos  kernels,  incluindo  o  xv6,  intercala  a  execução  de  múltiplas  atividades.  Uma  fonte  de  intercalação  é  o  
+hardware  multiprocessador:  computadores  com  múltiplas  CPUs  executando  independentemente,  como  o  RISC-V  do  
+xv6.  Essas  múltiplas  CPUs  compartilham  RAM  física,  e  o  xv6  explora  esse  compartilhamento  para  manter  estruturas  
+de  dados  que  todas  as  CPUs  leem  e  gravam.  Esse  compartilhamento  aumenta  a  possibilidade  de  uma  CPU  ler  uma  
+estrutura  de  dados  enquanto  outra  CPU  está  no  meio  da  atualização,  ou  mesmo  múltiplas  CPUs  atualizando  os  mesmos  
+dados  simultaneamente;  sem  um  projeto  cuidadoso,  esse  acesso  paralelo  provavelmente  produzirá  resultados  incorretos  
+ou  uma  estrutura  de  dados  quebrada.  Mesmo  em  um  uniprocessador,  o  kernel  pode  alternar  a  CPU  entre  várias  threads,  
+fazendo  com  que  sua  execução  seja  intercalada.  Por  fim,  um  manipulador  de  interrupção  de  dispositivo  que  modifica  os  
+mesmos  dados  como  algum  código  interrompível  pode  danificar  os  dados  se  a  interrupção  ocorrer  no  momento  errado.  
+O  termo  simultaneidade  se  refere  a  situações  em  que  múltiplos  fluxos  de  instruções  são  intercalados,  devido  ao  
+paralelismo  do  multiprocessador,  troca  de  threads  ou  interrupções.
+ Os  kernels  estão  repletos  de  dados  acessados  concorrentemente.  Por  exemplo,  duas  CPUs  poderiam  chamar  
+kalloc  simultaneamente,  saindo  simultaneamente  do  topo  da  lista  de  acessos  livres.  Os  projetistas  de  kernel  gostam  de  
+permitir  muita  concorrência,  pois  isso  pode  gerar  maior  desempenho  por  meio  do  paralelismo  e  maior  capacidade  de  
+resposta.  No  entanto,  como  resultado,  os  projetistas  de  kernel  precisam  se  convencer  da  correção,  apesar  dessa  
+concorrência.  Existem  muitas  maneiras  de  se  chegar  a  um  código  correto,  algumas  mais  fáceis  de  raciocinar  do  que  
+outras.  Estratégias  que  visam  à  correção  sob  concorrência,  e  abstrações  que  as  suportam,  são  chamadas  de  técnicas  
+de  controle  de  concorrência.
+ O  Xv6  utiliza  diversas  técnicas  de  controle  de  concorrência,  dependendo  da  situação;  muitas  outras  são  possíveis.  
+Este  capítulo  se  concentra  em  uma  técnica  amplamente  utilizada:  o  bloqueio.  Um  bloqueio  proporciona  exclusão  mútua,  
+garantindo  que  apenas  uma  CPU  por  vez  possa  manter  o  bloqueio.  Se  o  programador  associar  um  bloqueio  a  cada  item  
+de  dados  compartilhado,  e  o  código  sempre  mantiver  o  bloqueio  associado  ao  usar  um  item,  então  o  item  será  usado  
+por  apenas  uma  CPU  por  vez.  Nessa  situação,  dizemos  que  o  bloqueio  protege  o  item  de  dados.  Embora  os  bloqueios  
+sejam  um  mecanismo  de  controle  de  concorrência  fácil  de  entender,  a  desvantagem  dos  bloqueios  é  que  eles  podem  
+limitar  o  desempenho,  pois  serializam  operações  simultâneas.
+ O  restante  deste  capítulo  explica  por  que  o  xv6  precisa  de  bloqueios,  como  o  xv6  os  implementa  e  como  os  utiliza.
+ 59
+Machine Translated by Google
+ 6.1  Corridas
+ Memória
+ lista
+ l->próximo  =  lista
+ CPU
+ Figura  6.1:  Arquitetura  SMP  simplificada
+ ÔNIBUS
+ l->próximo  =  lista
+ CPU
+ Como  exemplo  de  por  que  precisamos  de  bloqueios,  considere  dois  processos  com  filhos  que  saíram  chamando  wait  em
+ duas  CPUs  diferentes.  wait  libera  a  memória  da  criança.  Assim,  em  cada  CPU,  o  kernel  chamará  kfree
+ para  liberar  as  páginas  de  memória  das  crianças.  O  alocador  do  kernel  mantém  uma  lista  encadeada:  kalloc()  
+(kernel /kalloc.c:69)  extrai  uma  página  de  memória  de  uma  lista  de  páginas  livres  e  kfree()  (kernel/kalloc.c:47)
+ coloca  uma  página  na  lista  de  livres.  Para  melhor  desempenho,  podemos  esperar  que  os  kfrees  da
+ dois  processos  pais  seriam  executados  em  paralelo  sem  que  nenhum  deles  tivesse  que  esperar  pelo  outro,  mas  isso
+ não  seria  correto  dada  a  implementação  kfree  do  xv6.
+ A  Figura  6.1  ilustra  a  configuração  com  mais  detalhes:  a  lista  vinculada  de  páginas  livres  está  na  memória  que  é
+ compartilhado  pelas  duas  CPUs,  que  manipulam  a  lista  usando  instruções  de  carga  e  armazenamento.  (Na  realidade,  o
+ os  processadores  têm  caches,  mas  conceitualmente  os  sistemas  multiprocessadores  se  comportam  como  se  houvesse  um  único,
+ memória  compartilhada.)  Se  não  houver  solicitações  simultâneas,  você  pode  implementar  uma  operação  de  envio  de  lista
+ do  seguinte  modo:
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ elemento  struct  {
+ };
+ dados  int;
+ struct  elemento  *próximo;
+ struct  elemento  *lista  =  0;
+ 7
+ 8
+ 9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ vazio
+ push(int  dados)
+ {
+ struct  elemento  *l;
+ l  
+=  malloc(tamanho  de  *l);
+ l->dados  =  dados;
+ l->next  =  lista;
+ lista  =  l;
+ 60
+Machine Translated by Google
+ CPU  1
+ Memória
+ CPU2
+ 17
+ }
+ 15
+ 15
+ 16
+ l->próximo
+ l->próximo
+ 16
+ Figura  6.2:  Exemplo  de  corrida
+ lista
+ lista
+ Tempo
+ Esta  implementação  está  correta  se  executada  isoladamente.  No  entanto,  o  código  não  está  correto  se  mais
+ mais  de  uma  cópia  é  executada  simultaneamente.  Se  duas  CPUs  executarem  push  ao  mesmo  tempo,  ambas  podem
+ execute  a  linha  15  conforme  mostrado  na  Fig.  6.1,  antes  de  executar  a  linha  16,  o  que  resulta  em  um  erro
+ resultado  conforme  ilustrado  pela  Figura  6.2.  Haveria  então  dois  elementos  de  lista  com  o  próximo  conjunto  para  o
+ valor  anterior  da  lista.  Quando  as  duas  atribuições  à  lista  acontecem  na  linha  16,  a  segunda  será
+ substituir  o  primeiro;  o  elemento  envolvido  na  primeira  atribuição  será  perdido.
+ A  atualização  perdida  na  linha  16  é  um  exemplo  de  corrida.  Uma  corrida  é  uma  situação  em  que  uma  memória
+ o  local  é  acessado  simultaneamente  e  pelo  menos  um  acesso  é  de  gravação.  Uma  corrida  geralmente  é  um  sinal  de  bug,
+ uma  atualização  perdida  (se  os  acessos  forem  gravações)  ou  uma  leitura  de  uma  estrutura  de  dados  atualizada  de  forma  incompleta.
+ O  resultado  de  uma  corrida  depende  do  código  de  máquina  gerado  pelo  compilador,  do  tempo  de
+ as  duas  CPUs  envolvidas  e  como  suas  operações  de  memória  são  ordenadas  pelo  sistema  de  memória,
+ o  que  pode  dificultar  a  reprodução  e  a  depuração  de  erros  induzidos  por  corrida.  Por  exemplo,  adicionar  print
+ declarações  durante  a  depuração  do  push  podem  alterar  o  tempo  de  execução  o  suficiente  para  fazer  o
+ raça  desaparece.
+ A  maneira  usual  de  evitar  corridas  é  usar  um  cadeado.  Os  cadeados  garantem  a  exclusão  mútua,  de  modo  que  apenas  um
+ A  CPU  pode  executar  as  linhas  sensíveis  do  push  por  vez ;  isso  torna  o  cenário  acima  impossível.
+ A  versão  corretamente  bloqueada  do  código  acima  adiciona  apenas  algumas  linhas  (destacadas  em  amarelo):
+ 6
+ 7
+ 8
+ 9  10
+ 11
+ 12
+ 13
+ 14
+ struct  elemento  *lista  =  0;
+ struct  lock  lista  de  bloqueio;
+ vazio
+ push(int  dados)
+ {
+ struct  elemento  *l;
+ l  
+=  malloc(tamanho  de  *l);
+ l->dados  =  dados;
+ 61
+Machine Translated by Google
+ 15
+ 16
+ 17
+ 18
+ 19
+ 20
+ adquirir(&listlock);  l->próximo  =  
+lista;  lista  =  l;  
+liberar(&listlock);
+ }
+ A  sequência  de  instruções  entre  aquisição  e  liberação  é  frequentemente  chamada  de  seção  crítica.
+ Geralmente,  diz-se  que  o  bloqueio  está  protegendo  a  lista.
+ Quando  dizemos  que  um  bloqueio  protege  dados,  na  verdade  queremos  dizer  que  o  bloqueio  protege  alguma  coleção  
+de  invariantes  que  se  aplicam  aos  dados.  Invariantes  são  propriedades  de  estruturas  de  dados  que  são  mantidas  entre  
+operações.  Normalmente,  o  comportamento  correto  de  uma  operação  depende  de  as  invariantes  serem  verdadeiras  
+quando  a  operação  começa.  A  operação  pode  violar  temporariamente  as  invariantes,  mas  deve  restabelecê-las  antes  de  
+terminar.  Por  exemplo,  no  caso  da  lista  encadeada,  a  invariante  é  que  a  lista  aponta  para  o  primeiro  elemento  da  lista  e  
+que  o  próximo  campo  de  cada  elemento  aponta  para  o  próximo  elemento.  A  implementação  de  push  viola  essa  invariante  
+temporariamente:  na  linha  17,  l  aponta  para  o  próximo  elemento  da  lista,  mas  list  ainda  não  aponta  para  l  (restabelecido  
+na  linha  18).  A  corrida  que  examinamos  acima  ocorreu  porque  uma  segunda  CPU  executou  código  que  dependia  das  
+invariantes  da  lista  enquanto  elas  estavam  (temporariamente)  violadas.  O  uso  adequado  de  um  bloqueio  garante  que  
+apenas  uma  CPU  por  vez  possa  operar  na  estrutura  de  dados  na  seção  crítica,  de  modo  que  nenhuma  CPU  executará  
+uma  operação  na  estrutura  de  dados  quando  as  invariantes  da  estrutura  de  dados  não  forem  válidas.
+ Você  pode  pensar  em  um  bloqueio  como  a  serialização  de  seções  críticas  simultâneas  para  que  sejam  
+executadas  uma  de  cada  vez,  preservando  assim  as  invariantes  (assumindo  que  as  seções  críticas  estejam  corretas  
+isoladamente).  Você  também  pode  pensar  em  seções  críticas  protegidas  pelo  mesmo  bloqueio  como  atômicas  entre  
+si,  de  modo  que  cada  uma  veja  apenas  o  conjunto  completo  de  alterações  das  seções  críticas  anteriores  e  nunca  
+veja  atualizações  parcialmente  concluídas.
+ Embora  úteis  para  a  correção,  os  bloqueios  limitam  inerentemente  o  desempenho.  Por  exemplo,  se  dois  
+processos  chamarem  kfree  simultaneamente,  os  bloqueios  serializarão  as  duas  seções  críticas,  de  modo  que  não  
+há  benefício  em  executá-los  em  CPUs  diferentes.  Dizemos  que  múltiplos  processos  entram  em  conflito  se  desejam  
+o  mesmo  bloqueio  ao  mesmo  tempo  ou  se  o  bloqueio  sofre  contenção.  Um  grande  desafio  no  projeto  do  kernel  é  
+evitar  a  contenção  de  bloqueios  em  busca  do  paralelismo.  O  Xv6  faz  pouco  disso,  mas  kernels  sofisticados  
+organizam  estruturas  de  dados  e  algoritmos  especificamente  para  evitar  a  contenção  de  bloqueios.
+ No  exemplo  da  lista,  um  kernel  pode  manter  uma  lista  livre  separada  por  CPU  e  somente  tocar  na  lista  livre  de  outra  
+CPU  se  a  lista  da  CPU  atual  estiver  vazia  e  ele  precisar  roubar  memória  de  outra  CPU.
+ Outros  casos  de  uso  podem  exigir  designs  mais  complicados.
+ O  posicionamento  dos  bloqueios  também  é  importante  para  o  desempenho.  Por  exemplo,  seria  correto  mover  a  
+aquisição  para  o  início  do  push,  antes  da  linha  13.  Mas  isso  provavelmente  reduziria  o  desempenho,  pois  as  
+chamadas  para  malloc  seriam  serializadas.  A  seção  "Usando  bloqueios"  abaixo  fornece  algumas  diretrizes  sobre  
+onde  inserir  as  invocações  acquire  e  release .
+ 62
+Machine Translated by Google
+ 6.2  Código:  Fechaduras
+ Xv6  possui  dois  tipos  de  travas:  spinlocks  e  sleep-locks.  Começaremos  com  spinlocks.  Xv6  representa
+ um  spinlock  como  uma  estrutura  spinlock  (kernel/spinlock.h:2).  O  campo  importante  na  estrutura  é
+ bloqueado,  uma  palavra  que  é  zero  quando  o  bloqueio  está  disponível  e  diferente  de  zero  quando  é  mantido.  Logicamente,  xv6
+ deve  adquirir  um  bloqueio  executando  um  código  como
+ 21
+ 22
+ 23
+ 24
+ 25
+ 26
+ 27
+ 28  
+29  
+30
+ vazio
+ acquire(struct  spinlock  *lk) //  não  funciona!
+ {
+ }
+ para(;;)  {
+ se(lk->bloqueado  ==  0)  {
+ lk->bloqueado  =  1;
+ quebrar;
+ }
+ }
+ Infelizmente,  esta  implementação  não  garante  a  exclusão  mútua  em  um  multiprocessador.
+ pode  acontecer  que  duas  CPUs  cheguem  simultaneamente  na  linha  25,  veja  que  lk->locked  é  zero,  e  então
+ ambos  pegam  o  bloqueio  executando  a  linha  26.  Neste  ponto,  duas  CPUs  diferentes  seguram  o  bloqueio,  o  que
+ viola  a  propriedade  de  exclusão  mútua.  O  que  precisamos  é  de  uma  maneira  de  fazer  as  linhas  25  e  26  serem  executadas  como
+ uma  etapa  atômica  (ou  seja,  indivisível).
+ Como  os  bloqueios  são  amplamente  utilizados,  os  processadores  multi-core  geralmente  fornecem  instruções  que  
+implementam  uma  versão  atômica  das  linhas  25  e  26.  No  RISC-V,  esta  instrução  é  amoswap  r,  a.
+ amoswap  lê  o  valor  no  endereço  de  memória  a,  escreve  o  conteúdo  do  registrador  r  nesse  endereço,
+ e  coloca  o  valor  lido  em  r.  Ou  seja,  ele  troca  o  conteúdo  do  registrador  e  da  memória
+ endereço.  Ele  executa  essa  sequência  atomicamente,  usando  hardware  especial  para  evitar  qualquer  outra  CPU
+ de  usar  o  endereço  de  memória  entre  a  leitura  e  a  gravação.
+ Aquisição  do  Xv6  (kernel/spinlock.c:22)  usa  a  chamada  de  biblioteca  C  portátil  __sync_lock_test_and_set,
+ que  se  resume  à  instrução  amoswap ;  o  valor  de  retorno  é  o  conteúdo  antigo  (trocado)  de
+ lk->bloqueado.  A  função  acquire  envolve  a  troca  em  um  loop,  tentando  novamente  (girando)  até  que  tenha
+ adquiriu  o  bloqueio.  Cada  iteração  troca  um  para  lk->locked  e  verifica  o  valor  anterior;  se
+ o  valor  anterior  é  zero,  então  adquirimos  o  bloqueio  e  a  troca  terá  definido  lk->locked
+ para  um.  Se  o  valor  anterior  for  um,  então  alguma  outra  CPU  detém  o  bloqueio,  e  o  fato  de  que
+ troquei  um  atomicamente  para  lk->locked  e  não  alterei  seu  valor.
+ Depois  que  o  bloqueio  é  adquirido,  o  acquire  registra,  para  depuração,  a  CPU  que  adquiriu  o  bloqueio.
+ O  campo  lk->cpu  é  protegido  pelo  bloqueio  e  só  deve  ser  alterado  enquanto  o  bloqueio  estiver  pressionado.
+ A  função  release  (kernel/spinlock.c:47)  é  o  oposto  de  adquirir:  limpa  o  lk->cpu
+ campo  e  então  libera  o  bloqueio.  Conceitualmente,  a  liberação  requer  apenas  atribuir  zero  a  lk->locked.
+ O  padrão  C  permite  que  os  compiladores  implementem  uma  atribuição  com  várias  instruções  de  armazenamento,  portanto,  um
+ A  atribuição  em  C  pode  não  ser  atômica  em  relação  ao  código  concorrente.  Em  vez  disso,  a  liberação  usa  o  C
+ função  de  biblioteca  __sync_lock_release  que  realiza  uma  atribuição  atômica.  Esta  função  também
+ resume-se  a  uma  instrução  RISC-V  amoswap .
+ 63
+Machine Translated by Google
+ 6.3  Código:  Usando  bloqueios
+ O  Xv6  usa  travas  em  muitos  lugares  para  evitar  corridas.  Como  descrito  acima,  kalloc  (kernel/kalloc.c:69)  e  kfree  (kernel/
+ kalloc.c:47)  formam  um  bom  exemplo.  Experimente  os  Exercícios  1  e  2  para  ver  o  que  acontece  se  essas  funções  omitirem  
+os  bloqueios.  Você  provavelmente  descobrirá  que  é  difícil  desencadear  comportamentos  incorretos,  o  que  sugere  que  é  difícil  
+testar  de  forma  confiável  se  o  código  está  livre  de  erros  de  bloqueio  e  corridas.  O  Xv6  pode  muito  bem  ter  corridas  ainda  não  
+descobertas.
+ Uma  parte  complexa  do  uso  de  bloqueios  é  decidir  quantos  bloqueios  usar  e  quais  dados  e  invariantes  cada  bloqueio  
+deve  proteger.  Existem  alguns  princípios  básicos.  Primeiro,  sempre  que  uma  variável  puder  ser  escrita  por  uma  CPU  ao  
+mesmo  tempo  em  que  outra  CPU  pode  lê-la  ou  escrevê-la,  um  bloqueio  deve  ser  usado  para  evitar  que  as  duas  operações  se  
+sobreponham.  Segundo,  lembre-se  de  que  os  bloqueios  protegem  invariantes:  se  uma  invariante  envolve  vários  locais  de  
+memória,  normalmente  todos  eles  precisam  ser  protegidos  por  um  único  bloqueio  para  garantir  que  a  invariante  seja  mantida.
+ As  regras  acima  dizem  quando  os  bloqueios  são  necessários,  mas  não  dizem  nada  sobre  quando  eles  são  
+desnecessários,  e  é  importante  para  a  eficiência  não  bloquear  demais,  porque  os  bloqueios  reduzem  o  paralelismo.  Se  o  
+paralelismo  não  for  importante,  pode-se  organizar  para  ter  apenas  uma  única  thread  e  não  se  preocupar  com  bloqueios.  Um  
+kernel  simples  pode  fazer  isso  em  um  multiprocessador  tendo  um  único  bloqueio  que  deve  ser  adquirido  ao  entrar  no  kernel  
+e  liberado  ao  sair  do  kernel  (embora  bloquear  chamadas  de  sistema,  como  leituras  de  pipe  ou  espera ,  representasse  um  
+problema).  Muitos  sistemas  operacionais  uniprocessadores  foram  convertidos  para  rodar  em  multiprocessadores  usando  essa  
+abordagem,  às  vezes  chamada  de  "bloqueio  de  kernel  grande",  mas  a  abordagem  sacrifica  o  paralelismo:  apenas  uma  CPU  
+pode  executar  no  kernel  por  vez.  Se  o  kernel  fizer  alguma  computação  pesada,  seria  mais  eficiente  usar  um  conjunto  maior  
+de  bloqueios  mais  refinados,  para  que  o  kernel  pudesse  executar  em  várias  CPUs  simultaneamente.
+ Como  exemplo  de  bloqueio  de  granulação  grossa,  o  alocador  kalloc.c  do  xv6  possui  uma  única  lista  de  páginas  livres  
+protegida  por  um  único  bloqueio.  Se  vários  processos  em  CPUs  diferentes  tentarem  alocar  páginas  simultaneamente,  cada  
+um  terá  que  aguardar  sua  vez,  girando  em  aquisição.  Girar  desperdiça  tempo  de  CPU,  pois  não  é  um  trabalho  útil.  Se  a  
+contenção  pelo  bloqueio  desperdiçasse  uma  fração  significativa  do  tempo  de  CPU,  talvez  o  desempenho  pudesse  ser  
+melhorado  alterando  o  design  do  alocador  para  ter  várias  listas  de  páginas  livres,  cada  uma  com  seu  próprio  bloqueio,  para  
+permitir  uma  alocação  verdadeiramente  paralela.
+ Como  exemplo  de  bloqueio  de  granularidade  fina,  o  xv6  possui  um  bloqueio  separado  para  cada  arquivo,  de  modo  que  
+processos  que  manipulam  arquivos  diferentes  podem  frequentemente  prosseguir  sem  esperar  pelos  bloqueios  uns  dos  outros.  
+O  esquema  de  bloqueio  de  arquivos  poderia  ser  ainda  mais  granular  se  fosse  necessário  permitir  que  processos  gravassem  
+simultaneamente  diferentes  áreas  do  mesmo  arquivo.  Em  última  análise,  as  decisões  sobre  a  granularidade  do  bloqueio  
+precisam  ser  orientadas  por  medições  de  desempenho,  bem  como  por  considerações  de  complexidade.
+ À  medida  que  os  capítulos  subsequentes  explicam  cada  parte  do  xv6,  eles  mencionarão  exemplos  do  uso  de  xv6  de
+ bloqueios  para  lidar  com  a  simultaneidade.  Como  prévia,  a  Figura  6.3  lista  todos  os  bloqueios  no  xv6.
+ 6.4  Deadlock  e  ordenação  de  bloqueio
+ Se  um  caminho  de  código  no  kernel  precisar  conter  vários  bloqueios  simultaneamente,  é  importante  que  todos  os  caminhos  
+de  código  adquiram  esses  bloqueios  na  mesma  ordem.  Caso  contrário,  há  risco  de  deadlock.  Digamos  que  dois  caminhos  de  
+código  no  xv6  precisem  dos  bloqueios  A  e  B,  mas  o  caminho  de  código  1  adquire  bloqueios  na  ordem  A  e  B.
+ 64
+Machine Translated by Google
+ Trancar
+ bcache.lock  
+cons.lock  
+ftable.lock  
+itable.lock  
+vdisk_lock  
+kmem.lock
+ Descrição
+ Protege  a  alocação  de  entradas  de  cache  do  buffer  de  bloco
+ Serializa  o  acesso  ao  hardware  do  console,  evita  saídas  misturadas
+ Serializa  a  alocação  de  um  arquivo  struct  na  tabela  de  arquivos
+ Protege  a  alocação  de  entradas  de  inode  na  memória
+ Serializa  o  acesso  ao  hardware  do  disco  e  à  fila  de  descritores  DMA
+ Serializa  a  alocação  de  memória
+ log.lock  Serializa  operações  no  log  de  transações
+ pi->lock  do  pipe  Serializa  operações  em  cada  pipe
+ pid_lock  Serializa  incrementos  de  next_pid
+ proc's  p->lock  Serializa  as  alterações  no  estado  do  processo
+ wait_lock  Ajuda  a  evitar  despertares  perdidos
+ tickslock  Serializa  operações  no  contador  de  ticks
+ ip->lock  do  inode  Serializa  operações  em  cada  inode  e  seu  conteúdo
+ bloqueio  de  buf
+ Serializa  as  operações  em  cada  buffer  de  bloco
+ Figura  6.3:  Bloqueios  em  xv6
+ B,  e  o  outro  caminho  os  adquire  na  ordem  B  e  depois  A.  Suponha  que  o  thread  T1  execute  o  caminho  de  código  1
+ e  adquire  o  bloqueio  A,  e  o  thread  T2  executa  o  caminho  de  código  2  e  adquire  o  bloqueio  B.  O  próximo  T1  tentará
+ adquirir  o  bloqueio  B,  e  T2  tentará  adquirir  o  bloqueio  A.  Ambos  os  adquirentes  bloquearão  indefinidamente,  porque  em
+ em  ambos  os  casos,  a  outra  thread  mantém  o  bloqueio  necessário  e  não  o  liberará  até  que  sua  aquisição  retorne.
+ Para  evitar  tais  impasses,  todos  os  caminhos  de  código  devem  adquirir  bloqueios  na  mesma  ordem.  A  necessidade  de  uma  estrutura  global
+ A  ordem  de  aquisição  de  bloqueios  significa  que  os  bloqueios  são  efetivamente  parte  da  especificação  de  cada  função:  chamadores
+ deve  invocar  funções  de  forma  que  os  bloqueios  sejam  adquiridos  na  ordem  acordada.
+ O  Xv6  possui  muitas  cadeias  de  ordem  de  bloqueio  de  comprimento  dois  envolvendo  bloqueios  por  processo  (o  bloqueio  em  cada
+ struct  proc)  devido  à  maneira  como  o  sleep  funciona  (veja  o  Capítulo  7).  Por  exemplo,  consoleintr
+ (kernel/console.c:136)  é  a  rotina  de  interrupção  que  lida  com  caracteres  digitados.  Quando  uma  nova  linha  chega,  qualquer  processo  
+que  esteja  aguardando  uma  entrada  do  console  deve  ser  ativado.  Para  fazer  isso,  consoleintr
+ mantém  cons.lock  enquanto  chama  wakeup,  que  adquire  o  bloqueio  do  processo  de  espera  para
+ Acorde-o.  Consequentemente,  a  ordem  de  bloqueio  global  para  evitar  deadlock  inclui  a  regra  de  que  cons.lock
+ deve  ser  adquirido  antes  de  qualquer  bloqueio  de  processo.  O  código  do  sistema  de  arquivos  contém  as  cadeias  de  bloqueio  mais  longas  do  xv6.
+ Por  exemplo,  a  criação  de  um  arquivo  requer  a  manutenção  simultânea  de  um  bloqueio  no  diretório  e  um  bloqueio  no  diretório.
+ inode  do  novo  arquivo,  um  bloqueio  em  um  buffer  de  bloco  de  disco,  o  vdisk_lock  do  driver  de  disco  e  o  p->lock  do  processo  de  
+chamada .  Para  evitar  deadlock,  o  código  do  sistema  de  arquivos  sempre  adquire  bloqueios  na  ordem  mencionada
+ na  frase  anterior.
+ Cumprir  uma  ordem  global  de  prevenção  de  impasses  pode  ser  surpreendentemente  difícil.  Às  vezes,  o  bloqueio
+ conflitos  de  ordem  com  a  estrutura  lógica  do  programa,  por  exemplo,  talvez  o  módulo  de  código  M1  chame  o  módulo  M2,  mas
+ a  ordem  de  bloqueio  exige  que  um  bloqueio  em  M2  seja  adquirido  antes  de  um  bloqueio  em  M1.  Às  vezes,  as  identidades
+ de  fechaduras  não  são  conhecidas  com  antecedência,  talvez  porque  uma  fechadura  deva  ser  mantida  para  descobrir  a
+ identidade  do  bloqueio  a  ser  adquirido  em  seguida.  Esse  tipo  de  situação  surge  no  sistema  de  arquivos  quando  ele  procura
+ componentes  sucessivos  em  um  nome  de  caminho  e  no  código  para  esperar  e  sair  enquanto  pesquisam  na  tabela
+ 65
+Machine Translated by Google
+ de  processos  procurando  por  processos  filhos.  Por  fim,  o  perigo  de  deadlock  costuma  ser  uma  restrição  à  precisão  de  
+um  esquema  de  bloqueio,  já  que  mais  bloqueios  geralmente  significam  mais  oportunidades  de  deadlock.  A  necessidade  
+de  evitar  deadlocks  costuma  ser  um  fator  importante  na  implementação  do  kernel.
+ 6.5  Eclusas  reentrantes
+ Pode  parecer  que  alguns  deadlocks  e  desafios  de  ordenação  de  bloqueios  poderiam  ser  evitados  com  o  uso  de  
+bloqueios  reentrantes,  também  chamados  de  bloqueios  recursivos.  A  ideia  é  que,  se  o  bloqueio  for  mantido  por  um  
+processo  e  esse  processo  tentar  obtê-lo  novamente,  o  kernel  poderia  simplesmente  permitir  isso  (já  que  o  processo  já  
+possui  o  bloqueio),  em  vez  de  acionar  o  pânico,  como  faz  o  kernel  xv6.
+ Acontece,  no  entanto,  que  bloqueios  reentrantes  dificultam  o  raciocínio  sobre  concorrência:  eles  quebram  a  
+intuição  de  que  bloqueios  fazem  com  que  seções  críticas  sejam  atômicas  em  relação  a  outras  seções  críticas.  
+Considere  as  duas  funções  a  seguir,  f  e  g:
+ struct  spinlock  lock;  int  data  =  0; //  
+protegido  por  bloqueio
+ f()  
+}
+ g()  
+}
+ { adquirir(&bloquear);  
+se(dados  ==  0)
+ { chamar_uma  vez();  
+h();  
+dados  =  1;
+ }  liberação(&bloqueio);
+ { adquirir(&lock);  if(dados  
+==  0){ chamar_uma  
+vez();  dados  =  1;
+ }  liberação(&bloqueio);
+ Olhando  para  este  fragmento  de  código,  a  intuição  é  que  call_once  será  chamado  apenas  uma  vez:
+ por  f,  ou  por  g,  mas  não  por  ambos.
+ Mas  se  bloqueios  reentrantes  forem  permitidos,  e  h  chamar  g,  call_once  será  chamado  duas  vezes.
+ Se  bloqueios  reentrantes  não  forem  permitidos,  então  h  chamando  g  resulta  em  um  deadlock,  o  que  também  não  
+é  bom.  Mas,  supondo  que  chamar  call_once  seja  um  erro  grave ,  um  deadlock  é  preferível.  O  desenvolvedor  do  kernel  
+observará  o  deadlock  (o  kernel  entra  em  pânico)  e  pode  corrigir  o  código  para  evitá-lo,  enquanto  chamar  call_once  
+duas  vezes  pode  resultar  silenciosamente  em  um  erro  difícil  de  rastrear.
+ Por  esse  motivo,  o  xv6  usa  bloqueios  não  reentrantes,  mais  fáceis  de  entender.  No  entanto,  desde  que  os  
+programadores  mantenham  as  regras  de  bloqueio  em  mente,  qualquer  uma  das  abordagens  pode  funcionar.  Se  o  xv6  fosse...
+ 66
+Machine Translated by Google
+ Para  usar  bloqueios  reentrantes,  seria  necessário  modificar  a  aquisição  para  perceber  que  o  bloqueio  está  atualmente  sendo  
+mantido  pela  thread  que  fez  a  chamada.  Também  seria  necessário  adicionar  uma  contagem  de  aquisições  aninhadas  à  struct  
+spinlock,  de  forma  semelhante  a  push_off,  que  será  discutido  a  seguir.
+ 6.6  Bloqueios  e  manipuladores  de  interrupção
+ Alguns  spinlocks  xv6  protegem  dados  usados  tanto  por  threads  quanto  por  manipuladores  de  interrupção.  Por  exemplo,  o  
+manipulador  de  interrupção  do  timer  clockintr  pode  incrementar  ticks  (kernel/trap.c:164).  aproximadamente  ao  mesmo  tempo  
+em  que  um  thread  do  kernel  lê  os  ticks  em  sys_sleep  (kernel/sysproc.c:59).  O  bloqueio  tickslock  serializa  os  dois  acessos.
+ A  interação  de  spinlocks  e  interrupções  levanta  um  perigo  potencial.  Suponha  que  sys_sleep  esteja  com  o  tickslock  
+bloqueado  e  sua  CPU  seja  interrompida  por  uma  interrupção  de  timer.  clockintr  tentaria  obter  o  tickslock,  verificar  se  ele  estava  
+bloqueado  e  aguardar  sua  liberação.  Nessa  situação,  o  tickslock  nunca  será  liberado:  somente  sys_sleep  pode  liberá-lo,  mas  
+sys_sleep  não  continuará  em  execução  até  que  clockintr  retorne.  Portanto,  a  CPU  entrará  em  deadlock  e  qualquer  código  que  
+precise  de  qualquer  um  dos  bloqueios  também  travará.
+ Para  evitar  essa  situação,  se  um  spinlock  for  usado  por  um  manipulador  de  interrupção,  uma  CPU  nunca  deve  manter  
+esse  bloqueio  com  interrupções  habilitadas.  O  Xv6  é  mais  conservador:  quando  uma  CPU  adquire  qualquer  bloqueio,  o  xv6  
+sempre  desabilita  as  interrupções  nessa  CPU.  Interrupções  ainda  podem  ocorrer  em  outras  CPUs,  portanto,  a  aquisição  de  
+uma  interrupção  pode  esperar  que  uma  thread  libere  um  spinlock;  mas  não  na  mesma  CPU.
+ O  Xv6  reativa  interrupções  quando  uma  CPU  não  possui  spinlocks;  ele  deve  fazer  uma  pequena  contabilidade  para  lidar  
+com  seções  críticas  aninhadas.  acquire  chama  push_off  (kernel/spinlock.c:89)  e  libera  chamadas  pop_off  (kernel/spinlock.c:100)  
+para  rastrear  o  nível  de  aninhamento  de  bloqueios  na  CPU  atual.  Quando  essa  contagem  chega  a  zero,  pop_off  restaura  o  
+estado  de  ativação  de  interrupção  que  existia  no  início  da  seção  crítica  mais  externa.  As  funções  intr_off  e  intr_on  executam  
+instruções  RISC-V  para  ativar  e  desativar  interrupções,  respectivamente.
+ É  importante  adquirir  a  chamada  push_off  estritamente  antes  de  definir  lk->locked  (kernel/spin-  lock.c:28).  Se  as  duas  
+opções  fossem  invertidas,  haveria  uma  breve  janela  de  tempo  em  que  o  bloqueio  seria  mantido  com  as  interrupções  habilitadas,  
+e  uma  interrupção  com  tempo  de  execução  indesejável  causaria  um  deadlock  no  sistema.  Da  mesma  forma,  é  importante  
+liberar  a  chamada  pop_off  somente  após  a  liberação  do  bloqueio  (kernel/spinlock.c:66).
+ 6.7  Instruções  e  ordenação  de  memória
+ É  natural  pensar  em  programas  sendo  executados  na  ordem  em  que  as  instruções  do  código-fonte  aparecem.
+ Este  é  um  modelo  mental  razoável  para  código  single-threaded,  mas  é  incorreto  quando  múltiplas  threads  interagem  através  
+da  memória  compartilhada  [2,  4].  Um  motivo  é  que  os  compiladores  emitem  instruções  de  carregamento  e  armazenamento  em  
+ordens  diferentes  daquelas  implícitas  no  código-fonte,  podendo  omiti-las  completamente  (por  exemplo,  armazenando  dados  em  
+cache  em  registradores).  Outro  motivo  é  que  a  CPU  pode  executar  instruções  fora  de  ordem  para  aumentar  o  desempenho.  
+Por  exemplo,  uma  CPU  pode  perceber  que,  em  uma  sequência  serial  de  instruções,  A  e  B  não  são  dependentes  uma  da  outra.  
+A  CPU  pode  iniciar  a  instrução  B  primeiro,  seja  porque  suas  entradas  estão  prontas  antes  das  entradas  de  A,  seja  para  
+sobrepor  a  execução  de  A  e  B.
+ 67
+Machine Translated by Google
+ Como  exemplo  do  que  poderia  dar  errado,  neste  código  para  push,  seria  um  desastre  se  o
+ o  compilador  ou  a  CPU  moveu  o  armazenamento  correspondente  à  linha  4  para  um  ponto  após  o  lançamento  na  linha  6:
+ 2 
+1
+ 3
+ 4
+ 5  6
+ l  
+=  malloc(sizeof  *l);  l->data  =  dados;  
+adquirir(&listlock);  l
+>next  =  lista;  lista  =  l;  
+liberar(&listlock);
+ Se  tal  reordenação  ocorresse,  haveria  uma  janela  durante  a  qual  outra  CPU  poderia  adquirir  o  bloqueio  e  observar  a  lista  
+atualizada,  mas  veria  uma  lista  não  inicializada->próximo.
+ A  boa  notícia  é  que  compiladores  e  CPUs  ajudam  programadores  simultâneos  seguindo  um  conjunto  de  regras  chamado  
+modelo  de  memória  e  fornecendo  alguns  primitivos  para  ajudar  os  programadores  a  controlar  a  reordenação.
+ Para  informar  ao  hardware  e  ao  compilador  para  não  reordenar,  o  xv6  usa  __sync_synchronize()  em  ambos  os  processos  
+de  aquisição  (kernel/spinlock.c:22)  e  liberar  (kernel/spinlock.c:47).  __sync_synchronize()  é  uma  barreira  de  memória:  ela  
+informa  ao  compilador  e  à  CPU  para  não  reordenarem  cargas  ou  armazenamentos  através  da  barreira.  As  barreiras  na  
+aquisição  e  liberação  do  xv6  forçam  a  ordem  em  quase  todos  os  casos  em  que  isso  importa,  já  que  o  xv6  usa  bloqueios  em  
+torno  de  acessos  a  dados  compartilhados.  O  Capítulo  9  discute  algumas  exceções.
+ 6.8  Bloqueios  de  sono
+ Às  vezes,  o  xv6  precisa  manter  um  bloqueio  por  muito  tempo.  Por  exemplo,  o  sistema  de  arquivos  (Capítulo  8)  mantém  um  
+arquivo  bloqueado  enquanto  lê  e  grava  seu  conteúdo  no  disco,  e  essas  operações  de  disco  podem  levar  dezenas  de  
+milissegundos.  Manter  um  bloqueio  de  spin  por  tanto  tempo  levaria  a  desperdício  se  outro  processo  quisesse  adquiri-lo,  já  que  
+o  processo  de  aquisição  consumiria  CPU  por  um  longo  tempo  enquanto  girava.  Outra  desvantagem  dos  bloqueios  de  spin  é  
+que  um  processo  não  pode  ceder  a  CPU  enquanto  mantém  um  bloqueio  de  spin;  gostaríamos  de  fazer  isso  para  que  outros  
+processos  possam  usar  a  CPU  enquanto  o  processo  com  o  bloqueio  aguarda  o  disco.
+ Ceder  enquanto  mantém  um  spinlock  é  ilegal  porque  pode  levar  a  um  deadlock  se  uma  segunda  thread  tentar  adquirir  o  
+spinlock;  como  a  aquisição  não  cede  a  CPU,  a  rotação  da  segunda  thread  pode  impedir  a  primeira  thread  de  executar  e  liberar  
+o  bloqueio.  Ceder  enquanto  mantém  um  bloqueio  também  violaria  o  requisito  de  que  as  interrupções  devem  estar  desativadas  
+enquanto  um  spinlock  é  mantido.  Portanto,  gostaríamos  de  um  tipo  de  bloqueio  que  ceda  a  CPU  enquanto  aguarda  para  
+adquirir  e  permita  cedes  (e  interrupções)  enquanto  o  bloqueio  é  mantido.
+ O  Xv6  fornece  tais  bloqueios  na  forma  de  bloqueios  de  sono.  acquiresleep  (kernel/sleeplock.c:22)  cede  a  CPU  enquanto  
+aguarda,  usando  técnicas  que  serão  explicadas  no  Capítulo  7.  Em  um  nível  mais  alto,  um  sleep-lock  possui  um  campo  
+bloqueado  que  é  protegido  por  um  spinlock,  e  a  chamada  de  acquiresleep  para  sleep  cede  atomicamente  a  CPU  e  libera  o  
+spinlock.  O  resultado  é  que  outras  threads  podem  executar  enquanto  acquiresleep  aguarda.
+ Como  os  bloqueios  de  suspensão  deixam  as  interrupções  habilitadas,  eles  não  podem  ser  usados  em  manipuladores  de  
+interrupção.  Como  acquiresleep  pode  render  a  CPU,  os  bloqueios  de  suspensão  não  podem  ser  usados  dentro  de  seções  
+críticas  de  spinlock  (embora  spinlocks  possam  ser  usados  dentro  de  seções  críticas  de  sleep-lock).
+ 68
+Machine Translated by Google
+ Os  spin-locks  são  mais  adequados  para  seções  críticas  curtas,  pois  esperar  por  eles  desperdiça  tempo  de  CPU;
+ Os  bloqueios  de  sono  funcionam  bem  para  operações  demoradas.
+ 6.9  Mundo  real
+ Programar  com  travas  continua  desafiador,  apesar  de  anos  de  pesquisa  sobre  primitivas  de  concorrência  e  paralelismo.  
+Muitas  vezes,  é  melhor  ocultar  travas  em  construções  de  nível  superior,  como  filas  sincronizadas,  embora  o  xv6  não  faça  
+isso.  Se  você  programa  com  travas,  é  aconselhável  usar  uma  ferramenta  que  tente  identificar  corridas,  pois  é  fácil  perder  
+uma  invariante  que  exija  uma  trava.
+ A  maioria  dos  sistemas  operacionais  suporta  threads  POSIX  (Pthreads),  que  permitem  que  um  processo  de  usuário  
+tenha  várias  threads  em  execução  simultaneamente  em  diferentes  CPUs.  Pthreads  suportam  bloqueios,  barreiras,  etc.  em  
+nível  de  usuário.  Pthreads  também  permitem  que  um  programador  especifique  opcionalmente  que  um  bloqueio  deve  ser  redefinido.
+ participante.
+ O  suporte  a  Pthreads  no  nível  do  usuário  requer  suporte  do  sistema  operacional.  Por  exemplo,  se  uma  pthread  for  
+bloqueada  em  uma  chamada  de  sistema,  outra  pthread  do  mesmo  processo  poderá  ser  executada  naquela  CPU.  Outro  
+exemplo:  se  uma  pthread  altera  o  espaço  de  endereço  do  seu  processo  (por  exemplo,  mapeia  ou  desmapeia  memória),  o  
+kernel  deve  providenciar  para  que  outras  CPUs  que  executam  threads  do  mesmo  processo  atualizem  suas  tabelas  de  páginas  
+de  hardware  para  refletir  a  alteração  no  espaço  de  endereço.
+ É  possível  implementar  bloqueios  sem  instruções  atômicas  [10],  mas  é  caro  e  a  maioria
+ sistemas  operacionais  usam  instruções  atômicas.
+ Bloqueios  podem  ser  caros  se  muitas  CPUs  tentarem  adquirir  o  mesmo  bloqueio  ao  mesmo  tempo.  Se  uma  CPU  tiver  
+um  bloqueio  armazenado  em  cache  em  seu  cache  local  e  outra  CPU  precisar  adquiri-lo,  a  instrução  atômica  para  atualizar  a  
+linha  de  cache  que  contém  o  bloqueio  deve  mover  a  linha  do  cache  de  uma  CPU  para  o  cache  da  outra  CPU,  e  talvez  
+invalidar  quaisquer  outras  cópias  da  linha  de  cache.  Buscar  uma  linha  de  cache  do  cache  de  outra  CPU  pode  ser  muito  mais  
+caro  do  que  buscar  uma  linha  de  um  cache  local.
+ Para  evitar  os  custos  associados  a  bloqueios,  muitos  sistemas  operacionais  utilizam  estruturas  de  dados  e  algoritmos  
+livres  de  bloqueios  [6,  12].  Por  exemplo,  é  possível  implementar  uma  lista  encadeada  como  a  apresentada  no  início  do  
+capítulo,  que  não  requer  bloqueios  durante  as  buscas  na  lista  e  uma  instrução  atômica  para  inserir  um  item  em  uma  lista.  A  
+programação  livre  de  bloqueios  é  mais  complicada,  no  entanto,  do  que  programar  bloqueios;  por  exemplo,  é  preciso  se  
+preocupar  com  a  reordenação  de  instruções  e  memória.  Programar  com  bloqueios  já  é  difícil,  portanto,  o  xv6  evita  a  
+complexidade  adicional  da  programação  livre  de  bloqueios.
