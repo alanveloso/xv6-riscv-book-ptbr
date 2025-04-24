@@ -1,124 +1,222 @@
-%   terminologia: 
-%     processo: refere-se à execução no espaço do usuário, ou talvez à struct proc etc.
-%     memória do processo: a parte inferior do espaço de endereçamento
-%     o processo possui uma thread com duas pilhas (uma para modo kernel e uma para 
-%     modo usuário)
-% breve explicação sobre as condições iniciais da tabela de páginas:
-%     paginação desligada, mas o mapeamento virtual é em sua maioria direto para o físico,
-%     que é como as coisas parecem quando ligamos a paginação também,
-%     já que a paginação é ativada após criarmos o primeiro processo.
-%   mencionar por que ainda existem SEG_UCODE/SEG_UDATA?
-%   será que realmente explicamos o que os dois bits inferiores de %cs fazem?
-%     em particular sua interação com PTE_U
-%   nota lateral sobre por que é extern char[]
-\chapter{Organização do sistema operacional} \label{CH:FIRST}
-Um requisito fundamental para um sistema operacional é suportar várias atividades simultaneamente. Por exemplo, usando a interface de chamadas de sistema descrita no Capítulo~\ref{CH:UNIX}, um processo pode iniciar novos processos com \lstinline{fork}. O sistema operacional deve \indextext{compartilhar o tempo} dos recursos do computador entre esses processos. Por exemplo, mesmo que haja mais processos do que CPUs físicas, o sistema operacional deve garantir que todos os processos tenham a chance de executar. O sistema operacional também deve providenciar \indextext{isolamento} entre os processos. Ou seja, se um processo tiver um bug e apresentar mau funcionamento, ele não deve afetar processos que não dependem do processo com erro. Contudo, isolamento completo é excessivo, já que deve ser possível que processos interajam intencionalmente; pipelines são um exemplo disso. Assim, um sistema operacional deve cumprir três requisitos: multiplexação, isolamento e interação.
-Este capítulo fornece uma visão geral de como sistemas operacionais são organizados para atingir esses três requisitos. Existem várias maneiras de fazer isso, mas este texto foca em projetos tradicionais centrados em um \indextext{kernel monolítico}, utilizado por muitos sistemas Unix. Este capítulo também oferece uma visão geral de um processo no xv6, que é a unidade de isolamento no xv6, e a criação do primeiro processo quando o xv6 inicia.
-O xv6 roda em um microprocessador RISC-V \indextext{multi-core}\footnote{ Por "multi-core", este texto se refere a múltiplas CPUs que compartilham memória, mas executam em paralelo, cada uma com seu próprio conjunto de registradores. Este texto às vezes usa o termo \indextext{multiprocessador} como sinônimo de multi-core, embora multiprocessador também possa se referir mais especificamente a um computador com vários chips de processador distintos.} e grande parte de sua funcionalidade de baixo nível (por exemplo, a implementação de processos) é específica do RISC-V. O RISC-V é uma CPU de 64 bits, e o xv6 é escrito em C "LP64", o que significa que long (L) e ponteiros (P) na linguagem C têm 64 bits, mas um {\tt int} tem 32 bits. Este livro assume que o leitor já tenha feito alguma programação em nível de máquina em alguma arquitetura, e introduzirá as ideias específicas do RISC-V à medida que forem surgindo. Os documentos da ISA de nível de usuário~\cite{riscv:user} e da arquitetura privilegiada~\cite{riscv:priv} são as especificações completas. Você também pode consultar "The RISC-V Reader: An Open Architecture Atlas"~\cite{riscv}.
-A CPU em um computador completo é cercada por hardware de suporte, em grande parte na forma de interfaces de E/S. O xv6 é escrito para o hardware de suporte simulado pela opção "-machine virt" do qemu. Isso inclui RAM, uma ROM contendo código de boot, uma conexão serial com o teclado/tela do usuário e um disco para armazenamento.
+%   terminology:
+%     process: refers to execution in user space, or maybe struct proc &c
+%     process memory: the lower part of the address space
+%     process has one thread with two stacks (one for in kernel mode and one for
+%     in user mode)
+% talk a little about initial page table conditions:
+%     paging not on, but virtual mostly mapped direct to physical,
+%     which is what things look like when we turn paging on as well
+%     since paging is turned on after we create first process.
+%   mention why still have SEG_UCODE/SEG_UDATA?
+%   do we ever really say what the low two bits of %cs do?
+%     in particular their interaction with PTE_U
+%   sidebar about why it is extern char[]
 
-%%
-\section{Abstraindo recursos físicos} 
-%%
+\chapter{Organização do sistema operacional}
+\label{CH:FIRST}
 
-A primeira pergunta que alguém pode fazer ao se deparar com um sistema operacional é: por que tê-lo? Ou seja, poderíamos implementar as chamadas de sistema da Figura~\ref{fig:api} como uma biblioteca, com a qual os aplicativos são vinculados. Nesse plano, cada aplicação poderia até ter sua própria biblioteca adaptada às suas necessidades. As aplicações poderiam interagir diretamente com os recursos de hardware e usá-los da melhor forma possível para alcançar alto desempenho ou desempenho previsível. Alguns sistemas operacionais para dispositivos embarcados ou sistemas em tempo real são organizados dessa forma.
-O problema dessa abordagem com bibliotecas é que, se houver mais de uma aplicação rodando, elas devem se comportar bem. Por exemplo, cada aplicação deve ceder periodicamente a CPU para que outras possam executar. Esse esquema de compartilhamento de tempo \textit{cooperativo} pode funcionar se todas as aplicações confiarem umas nas outras e não tiverem bugs. Mas o mais comum é que as aplicações não confiem umas nas outras e tenham bugs, então geralmente se deseja um isolamento mais forte do que o fornecido por esse esquema cooperativo.
-Para alcançar um isolamento forte, é útil proibir as aplicações de acessarem diretamente recursos sensíveis de hardware, abstraindo esses recursos em serviços. Por exemplo, aplicações Unix interagem com armazenamento apenas por meio das chamadas de sistema do sistema de arquivos, como \lstinline{open}, \lstinline{read}, \lstinline{write} e \lstinline{close}, ao invés de ler e escrever diretamente no disco. Isso fornece à aplicação a conveniência de nomes de caminhos, e permite que o sistema operacional (como implementador da interface) gerencie o disco. Mesmo que o isolamento não seja uma preocupação, programas que interagem intencionalmente (ou que apenas queiram se manter separados) provavelmente acharão o sistema de arquivos uma abstração mais conveniente do que o uso direto do disco.
-Da mesma forma, o Unix troca CPUs de hardware entre os processos de forma transparente, salvando e restaurando o estado dos registradores conforme necessário, de modo que as aplicações não precisam estar cientes do compartilhamento de tempo. Essa transparência permite que o sistema operacional compartilhe as CPUs mesmo que algumas aplicações estejam em loops infinitos.
-Outro exemplo: processos Unix usam \lstinline{exec} para montar sua imagem de memória, ao invés de interagir diretamente com a memória física. Isso permite que o sistema operacional decida onde posicionar um processo na memória; se a memória estiver escassa, o sistema operacional pode até armazenar parte dos dados do processo em disco. \lstinline{exec} também oferece aos usuários a conveniência de um sistema de arquivos para armazenar imagens executáveis de programas.
-Muitas formas de interação entre processos Unix ocorrem por meio de descritores de arquivos. Esses descritores não apenas abstraem muitos detalhes (por exemplo, onde os dados em um pipe ou arquivo estão armazenados), mas também são definidos de forma a simplificar a interação. Por exemplo, se uma aplicação em um pipeline falhar, o kernel gera um sinal de fim de arquivo para o próximo processo no pipeline.
-A interface de chamadas de sistema da Figura~\ref{fig:api} foi cuidadosamente projetada para fornecer conveniência ao programador e a possibilidade de isolamento forte. A interface Unix não é a única maneira de abstrair recursos, mas tem se mostrado uma abordagem eficaz.
+Um requisito fundamental para um sistema operacional é suportar diversas atividades ao mesmo tempo. Por exemplo, usando a interface de chamada de sistema %ou é melhor deixar "system call" em inglês mesmo? 
+descrita no Capítulo~\ref{CH:UNIX}
+um processo pode iniciar novos processos com 
+\lstinline{fork}.
+O sistema operacional deve 
+\indextext{compartilhar (time-share)} 
+os recursos do computador entre esses processos.
+Por exemplo, mesmo que haja mais processos
+do que CPUs de hardware, o sistema operacional
+deve garantir que todos os processos
+tenham a chance de ser executados.  O sistema operacional também deve providenciar
+\indextext{isolamento} 
+entre os processos.
+Ou seja, se um processo tiver um bug e apresentar mau funcionamento, ele não deve afetar os processos que não dependem do processo com bug. O isolamento completo, entretanto, é muito forte, pois deve ser possível que os processos interajam intencionalmente; os pipelines são um exemplo.
+Portanto, um sistema operacional deve atender a três requisitos: multiplexação, isolamento,
+e interação.
+
+Este capítulo apresenta uma visão geral de como os sistemas operacionais são
+organizados para atender a esses três requisitos. Existem muitas maneiras de
+fazer isso, mas este texto se concentra nos projetos mais comuns
+centrados em um \indextext{kernel monolítico}, que é usado por muitos sistemas
+operacionais Unix. Este capítulo também fornece uma visão geral de um processo
+xv6, que é a unidade de isolamento no xv6, e a criação
+do primeiro processo quando o xv6 é iniciado.
+
+Xv6 é executado em um \indextext{multi-core}\footnote{
+Por ``multi-core'' este texto significa várias CPUs que compartilham memória,
+mas executam em paralelo, cada uma com seu próprio conjunto de registros.
+Este texto às vezes usa o termo
+\indextext{multiprocessador}  como sinônimo de multi-core,
+embora multiprocessador também possa se referir mais especificamente a um computador com
+vários chips de processador distintos.} microprocessador RISC-V,
+e grande parte de sua funcionalidade de baixo nível
+(por exemplo, sua implementação de processo) é específica do
+RISC-V. O RISC-V é uma CPU de 64 bits, e o xv6 é escrito em C ``LP64'',
+o que significa que long (L) e ponteiros (P) na linguagem de programação C
+são de 64 bits, mas um {\tt int} é de 32 bits. Este livro pressupõe que o 
+leitor tenha feito um pouco de programação em nível de máquina em alguma 
+arquitetura e introduzirá ideias específicas do RISC-V à medida que forem surgindo.
+Os documentos ISA em nível de usuário~\cite{riscv:user} e arquitetura
+privilegiada~\cite{riscv:priv} são as especificações completas.
+Você também pode consultar
+``The RISC-V Reader: An Open Architecture Atlas''~\cite{riscv}.
+
+Em um computador completo, a CPU é cercada por hardware de suporte, sendo que
+grande parte dele está na forma de interfaces de E/S. O Xv6 foi escrito 
+para o hardware de suporte simulado pela opção ``-machine virt'' do qemu. Isso inclui
+RAM, uma ROM contendo código de inicialização, uma conexão serial com o teclado/tela
+do usuário e um disco para armazenamento.
 
 %% 
-\section{Modo usuário, modo supervisor e chamadas de sistema}
+\section{Abstração de recursos físicos}
 %% 
 
-Um isolamento forte requer uma barreira rígida entre as aplicações e o sistema
-operacional. Se a aplicação comete um erro, não queremos que o sistema
-operacional falhe, nem que outras aplicações sejam afetadas. Em vez disso, o sistema
-operacional deve ser capaz de encerrar a aplicação com falha e continuar executando
-as demais. Para alcançar esse isolamento, o sistema operacional deve garantir que
-as aplicações não possam modificar (ou sequer ler) as estruturas de dados e
-instruções do sistema operacional, nem acessar a memória de outros processos.
+A primeira pergunta que alguém pode fazer ao se deparar com um sistema operacional é:
+por que tê-lo? Ou seja, é possível implementar as chamadas de sistema na
+Figura~\ref{fig:api}
+como uma biblioteca, com a qual as aplicações se ligam. Nesse sentido,
+cada aplicação poderia até mesmo ter sua própria biblioteca adaptada às suas necessidades.
+As aplicações poderiam interagir diretamente com os recursos de hardware
+e usar esses recursos da melhor maneira para a aplicação (por exemplo, para obter um desempenho alto ou previsível). Alguns sistemas operacionais para
+sistemas embarcados ou sistemas em tempo real são organizados dessa forma.
 
-As CPUs fornecem suporte de hardware para esse tipo de isolamento. Por exemplo,
-o RISC-V possui três modos em que a CPU pode executar instruções:
-\indextext{modo máquina},
+A desvantagem dessa abordagem de biblioteca é que, se houver mais de um aplicativo
+em execução, os aplicativos deverão ser bem comportados.
+Por exemplo, cada aplicativo deve ceder periodicamente a CPU
+para que outros aplicativos possam ser executados.
+Esse esquema de compartilhamento de tempo 
+\textit{cooperativo} 
+pode ser adequado se todos os aplicativos confiarem uns nos outros e não tiverem bugs. É mais comum que os aplicativos não confiem uns nos outros e tenham bugs, portanto, muitas vezes é necessário um isolamento mais forte do que o fornecido por um esquema cooperativo.
+
+Para obter um isolamento forte, é útil proibir que aplicativos acessem diretamente recursos de hardware sensíveis e, em vez disso, abstrair os recursos em serviços. Por exemplo, aplicativos Unix interagem com o armazenamento apenas por meio das chamadas de sistema
+\lstinline{open},
+\lstinline{read},
+\lstinline{write}, 
+e
+\lstinline{close}
+do sistema de arquivos,
+em vez de ler e gravar diretamente no disco. 
+Isso proporciona ao aplicativo a conveniência dos nomes de caminho e permite que
+o sistema operacional (como implementador da interface) gerencie o disco. 
+Mesmo que o isolamento não seja uma preocupação, é provável que os programas
+que interagem intencionalmente (ou apenas desejam manter
+fora do caminho uns dos outros) considerem o sistema de arquivos uma abstração
+mais conveniente do que o uso direto do disco.
+
+Da mesma forma, o Unix alterna de forma transparente as CPUs de hardware entre os processos,
+salvando e restaurando o estado dos registradores conforme necessário,
+para que os aplicativos não precisem se preocupar com o compartilhamento de tempo. 
+Essa transparência permite que o sistema operacional compartilhe
+CPUs mesmo que alguns aplicativos estejam em loops infinitos.
+
+Como outro exemplo, os processos Unix usam 
+\lstinline{exec}
+para construir sua imagem de memória, em vez de interagir diretamente com a memória física. 
+Isso permite que o sistema operacional decida onde colocar um processo na memória; 
+se a memória for escassa, o sistema operacional poderá até mesmo armazenar alguns dos
+dados de um processo no disco.
+\lstinline{exec}
+também oferece aos usuários a conveniência de um sistema de arquivos
+para armazenar imagens de programas executáveis.  
+
+Muitas formas de interação entre os processos do Unix ocorrem por meio de descritores de arquivos.
+Os descritores de arquivos não apenas abstraem muitos detalhes
+(por exemplo, onde os dados em um canal ou arquivo são armazenados), 
+mas também são definidos de uma maneira que simplifica a interação.
+Por exemplo, se um aplicativo em um pipeline falhar, o kernel
+gera um sinal de fim de arquivo para o próximo processo no pipeline.
+
+A interface de chamada de sistema na Figura ~\ref{fig:api}
+foi cuidadosamente projetada para oferecer conveniência ao programador e
+a possibilidade de forte isolamento. A interface Unix
+não é a única maneira de abstrair recursos, mas provou ser uma boa
+maneira.
+
+%% 
+\section{Modo de usuário, modo de supervisor e chamadas de sistema}
+%% 
+
+O isolamento forte requer um limite rígido entre as aplicações e o sistema operacional. 
+Se a aplicação cometer um erro, não queremos que o sistema operacional
+falhe ou que outras aplicações falhem. Em vez disso, o sistema operacional deve ser
+capaz de limpar a aplicação com falha e continuar executando outros aplicativos.
+Para obter um isolamento forte, o sistema operacional deve providenciar para que as aplicações não possam modificar (ou mesmo ler) as estruturas de dados e instruções do sistema operacional
+e que os aplicativos não possam acessar a memória de outros processos.
+
+As CPUs oferecem suporte de hardware para um forte isolamento.
+Por exemplo, o RISC-V tem três modos nos quais a CPU pode executar instruções:
+\indextext{modo de máquina},
 \indextext{modo supervisor} e
 \indextext{modo usuário}.
-Instruções executadas em modo máquina têm privilégios totais; a
-CPU inicia em modo máquina. Esse modo é usado principalmente para
-configurar o computador durante o boot. O xv6 executa algumas poucas linhas em
-modo máquina e depois muda para o modo supervisor.
+As instruções executadas no modo de máquina têm privilégio total; uma CPU
+é iniciada no modo de máquina. O modo de máquina destina-se principalmente a
+configurar o computador durante a inicialização.
+O Xv6 executa algumas linhas no modo de máquina e depois muda para o modo supervisor.
 
 No modo supervisor, a CPU tem permissão para executar 
 \indextext{instruções privilegiadas}:
-por exemplo, habilitar e desabilitar interrupções, ler e escrever
-no registrador que contém o endereço da tabela de páginas, etc.
-Se uma aplicação no modo usuário tentar executar
-uma instrução privilegiada, a CPU não a executa; em vez disso, muda
-para o modo supervisor para que o código em modo supervisor possa encerrar a aplicação,
-pois ela tentou fazer algo proibido.
-A Figura~\ref{fig:os}
-no Capítulo~\ref{CH:UNIX} ilustra essa organização. Uma aplicação pode
-executar apenas instruções do modo usuário (por exemplo, somar números etc.) e diz-se que
-está em execução no 
-\indextext{espaço do usuário},
-enquanto o software em modo supervisor pode também executar instruções privilegiadas e
-diz-se que está executando no
+por exemplo, ativar e desativar interrupções, ler e gravar
+o registro que contém o endereço de uma tabela de páginas etc.
+Se um aplicativo no modo de usuário tentar executar
+uma instrução privilegiada, a CPU não executará a instrução, mas mudará
+para o modo de supervisor para que o código do modo de supervisor possa encerrar o aplicativo,
+porque ele fez algo que não deveria fazer.
+Figura~\ref{fig:os}
+no Capitulo~\ref{CH:UNIX} ilustra essa organização. Uma aplicação pode
+executar somente instruções no modo de usuário (por exemplo, somar números etc.) e é considerado
+em execução no 
+\indextext{modo usuário},
+enquanto o software no modo supervisor também pode executar instruções privilegiadas e
+é considerado em execução no
 \indextext{espaço do kernel}.
-O software que roda no espaço do kernel (ou em modo supervisor) é chamado de
+O software executado no espaço do kernel (ou no modo supervisor) é chamado de
 \indextext{kernel}.
 
-Uma aplicação que deseja invocar uma função do kernel (por exemplo, a
-chamada de sistema \lstinline{read} no xv6) precisa
-fazer uma transição para o kernel; uma aplicação \emph{não pode} invocar
-uma função do kernel diretamente. As CPUs oferecem uma instrução especial que troca
-o modo da CPU de usuário para supervisor e entra no kernel por um ponto de entrada
-especificado pelo próprio kernel. (O RISC-V
-fornece a instrução
+Um aplicativo que deseja invocar uma função do kernel (por exemplo, a chamada do sistema
+\lstinline{read}
+no xv6) deve 
+fazer a transição para o kernel; um aplicativo \emph{não pode} invocar uma função do kernel
+diretamente. As CPUs fornecem uma instrução especial que alterna a CPU
+do modo de usuário para o modo de supervisor e entra no kernel em um ponto de entrada
+especificado pelo kernel. (O RISC-V
+fornece a instrução 
 \indexcode{ecall}
-para esse fim.) Uma vez que a CPU mudou para o modo supervisor,
-o kernel pode então validar os argumentos da chamada de sistema (por exemplo,
-verificar se o endereço passado está dentro da memória da aplicação), decidir se
-a aplicação tem permissão para realizar a operação solicitada (por exemplo,
-verificar se ela pode escrever no arquivo especificado), e então negar
-ou executar a operação. É fundamental que o kernel controle o ponto de entrada para
-as transições ao modo supervisor; se a aplicação pudesse decidir esse ponto de entrada,
-uma aplicação maliciosa poderia, por exemplo, entrar no kernel em um ponto onde a
-validação dos argumentos fosse ignorada.
+para essa finalidade.) Depois que a CPU passa para o modo supervisor,
+o kernel pode validar os argumentos da chamada do sistema (por exemplo,
+verificar se o endereço passado para a chamada do sistema faz parte da memória do aplicativo), decidir se o aplicativo tem permissão para executar a operação solicitada (por exemplo,
+verificar se o aplicativo tem permissão para gravar o arquivo especificado)
+e, em seguida, negá-la ou executá-la. É importante que o kernel controle o ponto de entrada para
+transições para o modo supervisor; se o aplicativo pudesse decidir o ponto de entrada do kernel, um aplicativo mal-intencionado poderia, por exemplo, entrar no kernel em um ponto em que a validação dos argumentos fosse ignorada.
 
 %% 
-\section{Organização do kernel}
+\section{Organização do Kernel}
 %% 
 
-Uma questão fundamental de projeto é: que parte do sistema
-operacional deve ser executada em modo supervisor?
+Uma questão fundamental do projeto é qual parte do sistema operacional
+deve ser executada no modo supervisor. 
 Uma possibilidade é que todo o sistema operacional resida
-no kernel, de modo que as implementações de todas as chamadas de sistema
-executem em modo supervisor.
+no kernel, de modo que as implementações de todas as chamadas do sistema
+sejam executadas no modo supervisor.
 Essa organização é chamada de
-\indextext{kernel monolítico}.
+\indextext{Núcleo monolítico}.
 
-Nessa organização, todo o sistema operacional consiste em um único
-programa executando com privilégios completos de hardware.
-Essa abordagem é conveniente porque o projetista do sistema operacional não precisa
-decidir quais partes do sistema não precisam de acesso total ao hardware.
-Além disso, é mais fácil para as diferentes partes do sistema operacional
-cooperarem. Por exemplo, o sistema pode ter um cache de blocos que seja
-compartilhado tanto pelo sistema de arquivos quanto pelo sistema de memória virtual.
+Nessa organização, todo o sistema operacional consiste em um único programa
+executado com privilégio total de hardware
+. Essa organização é conveniente porque o projetista do sistema operacional não tem
+que decidir quais partes do sistema operacional não precisam de privilégio total de hardware
+. Além disso, é mais fácil para as diferentes partes do sistema operacional
+cooperar.  Por exemplo, um sistema operacional pode ter um cache de buffer que pode
+ser compartilhado pelo sistema de arquivos e pelo sistema de memória virtual.
 
 Uma desvantagem da organização monolítica é que as interações entre
-as diferentes partes do sistema operacional costumam ser complexas (como veremos
-ao longo deste texto), e, por isso, é fácil que o desenvolvedor cometa erros.
-Em um kernel monolítico, um erro pode ser fatal, pois uma falha em modo supervisor
-geralmente causa a falha do kernel. Se o kernel falhar,
-o computador para de funcionar e todas as aplicações falham também.
-É necessário reiniciar o computador para recomeçar.
+as diferentes partes do sistema operacional são muitas vezes complexas (como veremos no
+restante deste texto) e, portanto, é fácil para um desenvolvedor de sistema operacional
+cometer um erro.  Em um kernel monolítico, um erro é fatal, pois um erro
+no modo supervisor geralmente faz com que o kernel falhe.  Se o kernel falhar,
+o computador para de funcionar e, portanto, todos os aplicativos também falham.  O computador
+precisa ser reinicializado para começar novamente.
 
-Para reduzir o risco de erros no kernel, projetistas de sistemas operacionais podem minimizar a
-quantidade de código do sistema que roda em modo supervisor, executando a
-maior parte do sistema operacional em modo usuário.
+Para reduzir o risco de erros no kernel, os projetistas de sistemas operacionais podem minimizar a
+quantidade de código do sistema operacional que é executada no modo supervisor e executar a
+maior parte do sistema operacional no modo de usuário.
 Essa organização do kernel é chamada de
 \indextext{microkernel}.
 
@@ -129,61 +227,57 @@ Essa organização do kernel é chamada de
 \label{fig:mkernel}
 \end{figure}
 
-A Figura~\ref{fig:mkernel}
-ilustra esse projeto de microkernel. Na figura, o sistema de arquivos é executado como
-um processo em nível de usuário. Os serviços do sistema operacional executados como processos são chamados de servidores.
-Para permitir que aplicações interajam com o
-servidor de arquivos, o kernel fornece um mecanismo de comunicação entre processos
-para enviar mensagens de um processo em modo usuário para outro. Por exemplo, se uma aplicação como o shell
-deseja ler ou escrever um arquivo, ela envia uma mensagem ao servidor de arquivos e espera
-uma resposta.
+Figura~\ref{fig:mkernel}
+ilustra esse design de microkernel. Na figura, o sistema de arquivos é executado como um processo de nível de usuário. 
+Os serviços do sistema operacional executados como processos são chamados de servidores.
+Para permitir que os aplicativos interajam com o servidor de arquivos, o kernel fornece um mecanismo de comunicação entre processos
+para enviar mensagens de um processo em modo de usuário
+para outro. Por exemplo, se um aplicativo como o shell quiser ler ou gravar um arquivo,
+ele enviará uma mensagem ao servidor de arquivos e aguardará por uma resposta.
 
 Em um microkernel, a interface do kernel consiste em algumas funções de baixo nível
-para iniciar aplicações, enviar mensagens,
-acessar hardware de dispositivos, etc. Essa organização permite que o kernel seja
-relativamente simples, já que a maior parte do sistema operacional
-reside em servidores em modo usuário.
+para iniciar aplicativos, enviar mensagens,
+acessar o hardware do dispositivo, etc.  Essa organização permite que o kernel seja 
+relativamente simples, pois a maior parte do sistema operacional
+reside em servidores de nível de usuário.
 
-Na prática, tanto kernels monolíticos quanto microkernels são
-populares. Muitos
-kernels Unix são monolíticos. Por exemplo, o Linux possui um kernel monolítico,
-embora algumas funções do sistema operacional sejam executadas como servidores em modo usuário
-(por exemplo, o sistema de janelas). O Linux oferece alto desempenho para aplicações intensivas em SO,
-em parte porque os subsistemas do kernel podem ser fortemente integrados.
+No mundo real, tanto os kernels monolíticos quanto os microkernels são
+populares. Muitos kernels do Unix são monolíticos. 
+Por exemplo, o Linux tem um kernel monolítico,
+embora algumas funções do sistema operacional sejam executadas como servidores de nível de usuário (por exemplo, o sistema de janelas).
+O Linux oferece alto desempenho para aplicativos com uso intensivo do sistema operacional, em parte porque os subsistemas do kernel podem ser fortemente integrados.
 
-Sistemas operacionais como Minix, L4 e QNX são organizados como microkernels com
-servidores, e são amplamente utilizados em ambientes embarcados.
-Uma variante do L4, o seL4, é pequeno o suficiente para ter sido verificado formalmente quanto à
-segurança de memória e outras propriedades de segurança~\cite{sel4}.
+Sistemas operacionais como Minix, L4 e QNX são organizados como um microkernel com servidores
+e têm sido amplamente implantados em configurações incorporadas. Uma variante do
+do L4, o seL4, é pequena o suficiente para ter sido verificada quanto à segurança da memória
+e outras propriedades de segurança~\cite{sel4}.
 
 Há muito debate entre os desenvolvedores de sistemas operacionais sobre qual
-organização é melhor, e não há evidência conclusiva a favor de uma ou outra.
-Além disso, tudo depende do que se entende por “melhor”:
-desempenho mais rápido, tamanho menor do código, confiabilidade do kernel,
-confiabilidade do sistema como um todo (incluindo os serviços em modo usuário), etc.
+organização é melhor, e não há evidências conclusivas de uma forma ou
+de outra.  Além disso, depende muito do que significa “melhor”:
+desempenho mais rápido, tamanho de código menor, confiabilidade do kernel,
+confiabilidade do sistema operacional completo (incluindo serviços de nível de usuário), etc.
 
-Também existem considerações práticas que podem ser mais importantes
-do que a questão da organização em si. Alguns sistemas operacionais
-têm microkernel, mas executam alguns dos serviços em modo usuário no espaço do kernel
-por razões de desempenho. Alguns sistemas têm kernels monolíticos
-porque começaram assim, e não há muito incentivo para migrar para uma organização
-puramente baseada em microkernel, já que novos recursos podem ser mais importantes
-do que reescrever o sistema existente para se adequar a um design de microkernel.
+Há também considerações práticas que podem ser mais importantes
+do que a questão de qual organização.  Alguns sistemas operacionais
+têm um microkernel, mas executam alguns dos serviços de nível de usuário no espaço do kernel
+por motivos de desempenho. Alguns sistemas operacionais têm kernels
+monolíticos porque foi assim que começaram e há pouco incentivo
+para mudar para uma organização de microkernel puro, pois os novos recursos podem
+ser mais importantes do que reescrever o sistema operacional existente para se adequar a um design de microkernel.
 
-Do ponto de vista deste livro, sistemas operacionais microkernel e monolíticos
-compartilham muitas ideias fundamentais. Ambos implementam chamadas de sistema, usam
-tabelas de páginas, tratam interrupções, suportam processos, utilizam
-locks para controle de concorrência, implementam um sistema de arquivos,
-etc. Este livro foca nessas ideias centrais.
+Do ponto de vista deste livro, os sistemas operacionais monolíticos e de microkernel
+compartilham muitas ideias importantes.  Eles implementam chamadas de sistema, usam
+tabelas de páginas, lidam com interrupções, oferecem suporte a processos, usam
+bloqueios para controle de concorrência, implementam um sistema de arquivos,
+etc. Este livro se concentra nessas ideias centrais.
 
-O xv6 é
-implementado como um kernel monolítico, como a maioria dos sistemas Unix.
-Assim, a interface do kernel do xv6 corresponde à interface do sistema operacional,
-e o kernel implementa o sistema completo. Como
-o xv6 não fornece muitos serviços, seu kernel é menor do que o de alguns
-microkernels, mas conceitualmente o xv6 é monolítico.
+O Xv6 é implementado como um kernel monolítico, como a maioria dos sistemas operacionais Unix.
+Assim, a interface do kernel do xv6 corresponde à interface do sistema operacional, 
+e o kernel implementa o sistema operacional completo. Como o xv6 não fornece muitos serviços, 
+seu kernel é menor do que alguns microkernels, mas conceitualmente o xv6 é monolítico. 
 
-\section{Código: organização do xv6}
+\section{Código: organização xv6}
 
 \begin{figure}[t]
 \center
@@ -191,68 +285,66 @@ microkernels, mas conceitualmente o xv6 é monolítico.
 {\bf Arquivo} & {\bf Descrição} \\
 \midrule
 bio.c & Cache de blocos de disco para o sistema de arquivos. \\
-console.c & Conexão com o teclado e a tela do usuário. \\
-entry.S & Primeiras instruções de boot. \\
-exec.c & Implementação da chamada de sistema exec(). \\
-file.c & Suporte a descritores de arquivos. \\
+console.c &  Conecta o teclado e a tela do usuário. \\
+entry.S & As primeiras instruções de inicialização. \\
+exec.c & chamada de sistema exec(). \\
+file.c & Suporte ao descritor de arquivo. \\
 fs.c & Sistema de arquivos. \\
-kalloc.c & Alocador de páginas físicas. \\
-kernelvec.S & Tratamento de traps no kernel. \\
-log.c & Log de sistema de arquivos e recuperação de falhas. \\
-main.c & Inicialização dos módulos durante o boot. \\
+kalloc.c & Alocador de página física. \\
+kernelvec.S & Manipular traps do kernel. \\
+log.c & Registro de sistema de arquivos e recuperação de falhas. \\
+main.c & Controle a inicialização de outros módulos durante a inicialização. \\
 pipe.c & Pipes. \\
-plic.c & Controlador de interrupções RISC-V. \\
-printf.c & Saída formatada para o console. \\
-proc.c & Processos e escalonamento. \\
-sleeplock.c & Locks que liberam a CPU. \\
-spinlock.c & Locks que não liberam a CPU. \\
-start.c & Código inicial em modo máquina. \\
-string.c & Biblioteca de strings e arrays de bytes em C. \\
-swtch.S & Troca de contexto de threads. \\
-syscall.c & Encaminha chamadas de sistema para as funções correspondentes. \\
+plic.c & Controlador de interrupção RISC-V. \\
+printf.c & Saída formatada no console. \\
+proc.c & Processos e agendamento. \\
+sleeplock.c & Bloqueios que liberam a CPU. \\
+spinlock.c & Bloqueios que não liberam a CPU. \\
+start.c & Código de inicialização no modo máquina inicial. \\
+string.c & Biblioteca de string e byte-array em C. \\
+swtch.S & Troca de thread. \\
+syscall.c & Enviar chamadas de sistema para a função de manuseio. \\
 sysfile.c & Chamadas de sistema relacionadas a arquivos. \\
-sysproc.c & Chamadas de sistema relacionadas a processos. \\
-trampoline.S & Código em assembly para alternar entre usuário e kernel. \\
+sysproc.c & Chamadas de sistema relacionadas a processo. \\
+trampoline.S & Código de montagem para alternar entre o usuário e o kernel. \\
 trap.c & Código C para tratar e retornar de traps e interrupções. \\
-uart.c & Driver de console da porta serial. \\
+uart.c & Driver de dispositivo de console de porta serial. \\
 virtio\_disk.c & Driver de dispositivo de disco. \\
-vm.c & Gerenciamento de tabelas de páginas e espaços de endereçamento. \\
+vm.c & Gerenciar tabelas de páginas e espaços de endereços. \\
 \end{tabular}
-\caption{Arquivos fonte do kernel xv6.}
+\caption{Arquivos de código-fonte do kernel Xv6.}
 \label{fig:source}
 \end{figure}
 
-O código-fonte do kernel do xv6 está no subdiretório {\tt kernel/}.
-O código é dividido em arquivos, seguindo uma ideia geral de modularidade;
-a Figura~\ref{fig:source} lista os arquivos. As interfaces entre os módulos
+O código-fonte do kernel xv6 está no subdiretório {\tt kernel/}. O código-fonte
+é dividido em arquivos, seguindo uma noção aproximada de modularidade;
+Figura~\ref{fig:source} lista os arquivos. As interfaces entre módulos
 são definidas em \lstinline{defs.h} \fileref{kernel/defs.h}.
 
 %% 
 \section{Visão geral do processo}
 %% 
 
-A unidade de isolamento no xv6 (assim como em outros sistemas operacionais Unix) é um 
+A unidade de isolamento no xv6 (como em outros sistemas operacionais Unix) é um 
 \indextext{processo}.
-A abstração de processo impede que um processo destrua ou espione
-a memória, CPU, descritores de arquivos, etc., de outro processo. Também impede que um processo
-corrompa o próprio kernel, de modo que ele não possa subverter os mecanismos de isolamento do kernel.
-O kernel deve implementar a abstração de processo com cuidado, pois
-um aplicativo com bugs ou malicioso pode tentar enganar o kernel ou o hardware para fazer
-algo prejudicial (por exemplo, burlar o isolamento). Os mecanismos usados pelo
-kernel para implementar processos incluem a flag de modo usuário/supervisor, os espaços de endereçamento
-e a divisão de tempo (time-slicing) entre threads.
+A abstração do processo impede que um processo destrua ou espione a memória, a CPU, os descritores de arquivos etc. de outro processo.  Ela também impede que um processo
+destrua o próprio kernel, de modo que um processo não possa subverter os mecanismos de isolamento do kernel.
+O kernel deve implementar a abstração do processo com cuidado porque
+um aplicativo com bugs ou mal-intencionado pode enganar o kernel ou o hardware para fazer
+algo ruim (por exemplo, contornar o isolamento). Os mecanismos usados pelo
+kernel para implementar processos incluem o sinalizador de modo de usuário/supervisor, espaços de endereço, e divisão de tempo de threads.
 
-Para ajudar a reforçar o isolamento, a abstração de processo fornece a
-ilusão ao programa de que ele possui sua própria máquina privada. Um processo fornece
-ao programa o que parece ser um sistema de memória próprio, ou
-\indextext{espaço de endereçamento},
-ao qual outros processos não têm acesso de leitura ou escrita.
-Um processo também fornece ao programa o que parece ser sua própria
-CPU para executar as instruções do programa.
+Para ajudar a reforçar o isolamento, a abstração do processo fornece a
+ilusão a um programa de que ele tem sua própria máquina privada.  Um processo fornece
+a um programa o que parece ser um sistema de memória privado, ou
+\indextext{espaço de endereço}, 
+que outros processos não podem ler ou gravar.
+Um processo também fornece ao programa o que parece ser sua própria CPU
+para executar as instruções do programa.
 
-O xv6 utiliza tabelas de páginas (implementadas pelo hardware) para fornecer a cada processo
-seu próprio espaço de endereçamento. A tabela de páginas do RISC-V
-traduza (ou ``mapeia'') um
+O Xv6 usa tabelas de páginas (que são implementadas por hardware) para dar a cada processo
+seu próprio espaço de endereço. A tabela de páginas do RISC-V
+traduz (ou ``mapeia'') um
 \indextext{endereço virtual}
 (o endereço que uma instrução RISC-V manipula) para um
 \indextext{endereço físico}
@@ -261,124 +353,123 @@ traduza (ou ``mapeia'') um
 \begin{figure}[t]
 \centering
 \includegraphics[scale=0.5]{fig/as.pdf}
-\caption{Organização do espaço de endereçamento virtual de um processo}
+\caption{Layout do espaço de endereço virtual de um processo}
 \label{fig:as}
 \end{figure}
 
-O xv6 mantém uma tabela de páginas separada para cada processo que define o espaço de
-endereçamento desse processo. Como ilustrado na
+O Xv6 mantém uma tabela de páginas separada para cada processo que define o espaço de endereço
+desse processo. Conforme ilustrado na 
 Figura~\ref{fig:as},
-um espaço de endereçamento inclui a
-\indextext{memória de usuário}
-do processo começando no endereço virtual zero. As instruções vêm primeiro,
-seguidas por variáveis globais, depois a pilha (stack),
-e finalmente uma área de "heap" (para malloc)
+um espaço de endereço inclui a
+\indextext{user memory}
+do processo, começando no endereço virtual zero. As instruções vêm primeiro,
+seguidas pelas variáveis globais, depois a pilha,
+e, finalmente, uma área de ``heap'' (para malloc)
 que o processo pode expandir conforme necessário.
-Existem vários fatores que limitam o
-tamanho máximo do espaço de endereçamento de um processo:
-os ponteiros no RISC-V têm 64 bits de largura;
-o hardware usa apenas os 39 bits inferiores ao
-consultar endereços virtuais nas tabelas de páginas;
-e o xv6 usa apenas 38 desses 39 bits.
-Assim, o endereço máximo é $2^{38}-1$ =
-0x3fffffffff, que é \lstinline{MAXVA}~\lineref{kernel/riscv.h:/define.MAXVA/}.
-No topo do espaço de endereçamento, o xv6 coloca
-uma página de \indextext{trampolim} (4096 bytes)
-e uma página de \indextext{trapframe}. O xv6 utiliza essas duas páginas
-para fazer a transição para o kernel e de volta;
-a página de trampolim contém o código para fazer a transição de entrada e saída
+Há vários fatores que limitam o
+tamanho máximo do espaço de endereço de um processo:
+ponteiros no RISC-V têm 64 bits de largura;
+o hardware usa somente os 39 bits mais baixos quando
+procura endereços virtuais nas tabelas de páginas;
+e xv6 usam somente 38 desses 39 bits.
+Portanto, o endereço máximo é $2^{38}-1$ =
+No topo do espaço de endereço, o xv6 coloca
+uma página \indextext{trampoline} page (4096 bytes)
+e uma página \indextext{trapframe}.  O Xv6 usa essas duas páginas
+para fazer a transição para o kernel e vice-versa;
+a página trampoline contém o código para fazer a transição para dentro e para fora
 do kernel, e o trapframe é onde o kernel salva
-os registradores de usuário do processo,
-como será explicado no Capítulo~\ref{CH:TRAP}.
+os registros de usuário do processo,
+como explica o Capítulo~\ref{CH:TRAP}.
 
-O kernel do xv6 mantém muitas informações de estado para cada processo,
-que são agrupadas em uma
+O kernel xv6 mantém muitas partes de estado para cada processo,
+que ele reúne em um
 \indexcode{struct proc}
-\lineref{kernel/proc.h:/^struct.proc/}.
-As informações mais importantes de estado de kernel de um processo são sua
-tabela de páginas, sua pilha de kernel e seu estado de execução.
+As partes mais importantes do estado do kernel de um processo são sua
+tabela de páginas, sua pilha do kernel e seu estado de execução.
 Usaremos a notação
 \indexcode{p->xxx}
-para nos referirmos aos elementos da estrutura
-\lstinline{proc};
-por exemplo,
+para se referir a elementos da
+\lstinline{proc}
+estrutura; por exemplo,
 \indexcode{p->pagetable} é um ponteiro para a tabela de páginas do processo.
 
-Cada processo possui um fluxo de controle (ou
-\indextext{thread}, em inglês) que mantém o estado necessário para executar o processo.
-Em determinado momento, uma thread pode estar executando em uma CPU,
-ou suspensa (não executando, mas capaz de retomar a execução
+Cada processo possui uma thread de controle (ou
+\indextext{thread}
+para abreviar) que contém o estado necessário para executar o processo.
+A qualquer momento, uma thread pode estar em execução na CPU,
+ou suspensa (sem execução, mas capaz de retomar a execução
 no futuro).
 Para alternar uma CPU entre processos,
-o kernel suspende a thread que está atualmente em execução nessa CPU
-e salva seu estado,
-e restaura o estado da thread anteriormente suspensa de outro processo.
-Grande parte do estado de uma thread (variáveis locais, endereços de retorno de chamadas de função)
-é armazenado nas pilhas da thread.
-Cada processo possui duas pilhas: uma pilha de usuário e uma pilha de kernel
+o kernel suspende a thread em execução naquela CPU
+e salva seu estado, e restaura o estado da thread suspensa anteriormente de outro processo. 
+Grande parte do estado de uma thread (variáveis locais, endereços de retorno de chamadas de função) é armazenada nas pilhas da thread.
+Cada processo possui duas pilhas: uma pilha do usuário e uma pilha do kernel
 (\indexcode{p->kstack}).
-Quando o processo está executando instruções de usuário, apenas sua pilha de usuário
-está em uso, e sua pilha de kernel está vazia.
-Quando o processo entra no kernel (por uma chamada de sistema ou interrupção),
-o código do kernel é executado na pilha de kernel do processo; enquanto
-o processo está no kernel, sua pilha de usuário ainda contém dados salvos,
-mas não está sendo usada ativamente.
-A thread de um processo alterna entre o uso ativo da pilha de usuário
-e da pilha de kernel. A pilha de kernel é separada (e protegida do
-código de usuário) para que o kernel
-possa executar mesmo que o processo tenha corrompido sua pilha de usuário.
+Quando o processo está executando instruções do usuário, apenas sua pilha do usuário
+está em uso e sua pilha do kernel está vazia.
+Quando o processo entra no kernel (para uma chamada de sistema ou interrupção),
+o código do kernel é executado na pilha do kernel do processo; enquanto
+um processo está no kernel, sua pilha do usuário ainda contém dados
+salvos, mas não é usada ativamente.
+A thread de um processo alterna entre usar ativamente sua pilha do usuário
+e sua pilha do kernel. A pilha do kernel é separada (e protegida do
+código do usuário) para que o kernel
+possa ser executado mesmo que um processo tenha destruído sua pilha do usuário.
 
-Um processo pode fazer uma chamada de sistema executando a instrução \indexcode{ecall}
-do RISC-V. Essa instrução eleva o nível de privilégio do hardware e
+Um processo pode fazer uma chamada de sistema executando a instrução RISC-V \indexcode{ecall}. Esta instrução aumenta o nível de privilégio de hardware e
 altera o contador de programa para um ponto de entrada definido pelo kernel. O código
-nesse ponto de entrada alterna para a pilha de kernel do processo e executa as instruções do kernel
+no ponto de entrada alterna para a pilha do kernel do processo e executa as instruções do kernel
 que implementam a chamada de sistema. Quando a chamada de sistema
-é concluída, o kernel alterna de volta para a pilha de usuário e retorna ao
-modo usuário chamando a instrução \indexcode{sret}, que reduz
-o nível de privilégio do hardware e retoma a execução das instruções de usuário
-logo após a instrução da chamada de sistema. A thread de um processo pode
-"bloquear" no kernel enquanto espera por I/O, e retomar de onde parou
-quando o I/O estiver concluído.
+é concluída, o kernel retorna para a pilha do usuário e retorna ao
+espaço do usuário chamando a instrução \indexcode{sret}, que reduz
+o nível de privilégio de hardware e retoma a execução das instruções do usuário
+logo após a instrução de chamada de sistema. A thread de um processo pode
+``bloquear'' no kernel para aguardar a E/S e retomar de onde parou
+quando a E/S terminar.
 
-\indexcode{p->state}
+\indexcode{p->state} 
 indica se o processo está alocado, pronto
-para executar, atualmente executando em uma CPU, aguardando por I/O, ou finalizando.
+para ser executado, atualmente em execução em uma CPU, aguardando E/S ou saindo.
 
 \indexcode{p->pagetable}
-armazena a tabela de páginas do processo, no formato
+contém a tabela de páginas do processo, no formato
 esperado pelo hardware RISC-V.
-O xv6 faz com que o hardware de paginação utilize a
+O Xv6 faz com que o hardware de paginação utilize a
 \lstinline{p->pagetable}
-ao executar aquele processo no modo usuário.
-A tabela de páginas de um processo também serve como o registro dos
-endereços das páginas físicas alocadas para armazenar a memória do processo.
+de um processo ao executá-lo no espaço do usuário.
+A tabela de páginas de um processo também serve como registro dos
+endereços das páginas físicas alocadas para armazenar a
+memória do processo.
 
-Resumindo, um processo combina duas ideias de projeto: um espaço de endereçamento para
-dar ao processo a ilusão de possuir sua própria memória, e uma thread para dar
-ao processo a ilusão de possuir sua própria CPU. No xv6, um processo consiste
-em um espaço de endereçamento e uma thread. Em sistemas operacionais reais,
+Em resumo, um processo agrupa duas ideias de design: um espaço de endereço para
+dar a um processo a ilusão de sua própria memória e uma thread para
+dar ao processo a ilusão de sua própria CPU. No xv6, um processo consiste
+em um espaço de endereço e uma thread. Em sistemas operacionais reais,
 um processo pode ter mais de uma thread para aproveitar múltiplas CPUs.
 
-%%
-\section{Código: iniciando o xv6, o primeiro processo e chamada de sistema}
-%%
+%% 
+\section{Código: iniciando xv6, o primeiro processo e chamada de sistema}
+%% 
+Para tornar o xv6 mais concreto, descreveremos como o kernel inicia e
+executa o primeiro processo. Os capítulos subsequentes descreverão os
+mecanismos que aparecem nesta visão geral com mais detalhes.
 
-Para tornar o xv6 mais concreto, vamos esboçar como o kernel inicia e executa o primeiro processo. Os capítulos seguintes descreverão em mais detalhes os mecanismos apresentados nesta visão geral.
-
-Quando o computador RISC-V é ligado, ele se inicializa e executa um carregador de boot armazenado na memória somente leitura. O carregador de boot carrega o kernel do xv6 na memória. Em seguida, no modo máquina, a CPU executa o xv6 a partir de
+Quando o computador RISC-V é ligado, ele se inicializa e executa um carregador de boot armazenado em memória somente leitura. O carregador de boot carrega o kernel xv6 na memória. Então, no modo máquina, a CPU executa o xv6 a partir de
 \indexcode{_entry}
-\lineref{kernel/entry.S:/^.entry:/}.
-O RISC-V começa com o hardware de paginação desabilitado: os endereços virtuais mapeiam diretamente para endereços físicos.
+.O RISC-V inicia com o hardware de paginação desabilitado:
+endereços virtuais são mapeados diretamente para endereços físicos.
 
-O carregador carrega o kernel do xv6 na memória no endereço físico
+O carregador carrega o kernel xv6 na memória no endereço físico
 \texttt{0x80000000}.
-A razão para colocá-lo em
+O motivo pelo qual ele coloca o kernel em
 \texttt{0x80000000}
 em vez de
 \texttt{0x0}
-é que a faixa de endereços
+é porque o intervalo de endereços
 \texttt{0x0:0x80000000}
-contém dispositivos de I/O.
+contém dispositivos de E/S.
+
 
 As instruções em
 \lstinline{_entry}
@@ -387,14 +478,14 @@ O xv6 declara espaço para uma pilha inicial,
 \lstinline{stack0},
 no arquivo
 \lstinline{start.c}
-\lineref{kernel/start.c:/stack0/}.
 O código em
 \lstinline{_entry}
 carrega o registrador de ponteiro de pilha
 \texttt{sp}
 com o endereço
 \lstinline{stack0+4096},
-o topo da pilha, porque a pilha no RISC-V cresce para baixo.
+o topo da pilha, porque a pilha
+no RISC-V cresce para baixo.
 Agora que o kernel tem uma pilha,
 \lstinline{_entry}
 chama o código C em
@@ -403,71 +494,115 @@ chama o código C em
 
 A função
 \lstinline{start}
-realiza algumas configurações que só são permitidas no modo máquina, e então muda para o modo supervisor.
-Para entrar no modo supervisor, o RISC-V fornece a instrução
+executa algumas configurações permitidas apenas no
+modo máquina e, em seguida, alterna para o modo supervisor.
+Para entrar no modo supervisor, o RISC-V
+fornece a instrução
 \lstinline{mret}.
-Essa instrução normalmente é usada para retornar de uma chamada anterior do modo supervisor para o modo máquina.
-\lstinline{start} não está retornando de tal chamada, mas sim configurando as coisas como se estivesse:
-ela define o modo de privilégio anterior como supervisor no registrador
+Esta instrução é mais frequentemente usada para retornar de
+uma chamada anterior do modo supervisor para o modo máquina.
+\lstinline{start} não retorna de tal chamada, mas
+configura as coisas como se retornasse:
+define o modo de privilégio anterior como
+supervisor no registrador
 \lstinline{mstatus},
 define o endereço de retorno como
 \lstinline{main}
-escrevendo o endereço de
+gravando o endereço
 \lstinline{main}
-no registrador
+no
+registrador
 \lstinline{mepc},
-desativa a tradução de endereços virtuais no modo supervisor escrevendo
+desabilita a tradução de endereços virtuais no modo supervisor
+gravando
 \lstinline{0}
-no registrador de tabela de páginas
+no registrador da tabela de páginas
 \lstinline{satp},
-e delega todas as interrupções e exceções ao modo supervisor.
+e delega todas as interrupções e exceções
+ao modo supervisor.
 
-Antes de saltar para o modo supervisor,
+Antes de entrar no modo supervisor,
 \lstinline{start}
-realiza uma última tarefa: programa o chip de clock para gerar interrupções de temporizador.
-Com essa configuração finalizada,
+executa mais uma tarefa: programa o chip do relógio
+para gerar interrupções de temporizador.
+Com essa tarefa concluída,
 \lstinline{start}
-“retorna” ao modo supervisor chamando
+``retorna'' ao modo supervisor chamando
 \lstinline{mret}.
 Isso faz com que o contador de programa mude para
 \lstinline{main}
-\lineref{kernel/main.c:/^main/},
-o endereço armazenado anteriormente em \lstinline{mepc}.
-
-Após
+o endereço previamente armazenado em 
+\lstinline{mepc}.
+Após 
 \lstinline{main}
-\lineref{kernel/main.c:/^main/}
-inicializar vários dispositivos e subsistemas, ele cria o primeiro processo chamando
-\lstinline{userinit}
-\lineref{kernel/proc.c:/^userinit/}.
-O primeiro processo executa um pequeno programa escrito em assembly RISC-V, que faz a primeira chamada de sistema no xv6.
-\indexcode{initcode.S}
-\lineref{user/initcode.S:3}
-carrega o número da chamada de sistema \lstinline{exec},
-\lstinline{SYS_EXEC}
-\lineref{kernel/syscall.h:/exec/},
-no registrador {\tt a7}, e então chama \lstinline{ecall} para reentrar no kernel.
+inicializar vários dispositivos e subsistemas,
+ele cria o primeiro processo chamando
+\lstinline{userinit}.
+O primeiro processo executa um pequeno programa escrito em assembly RISC-V,
+que faz a primeira chamada de sistema no xv6.
+
+\indexcode{initcode.S} 
+\lineref{user/initcode.S}{3} carrega o número da chamada de sistema \lstinline{exec}
+, \lstinline{SYS_EXEC}
+no registrador {\tt a7},
+e então chama \lstinline{ecall} para entrar novamente no kernel.
 
 O kernel usa o número no registrador {\tt a7} em \lstinline{syscall}
-\lineref{kernel/syscall.c:/^syscall/}
-para chamar a chamada de sistema desejada.
-A tabela de chamadas de sistema
-\lineref{kernel/syscall.c:/syscalls/}
-mapeia \lstinline{SYS_EXEC} para a função \lstinline{sys_exec}, que o kernel invoca.
-Como vimos no Capítulo~\ref{CH:UNIX}, \indexcode{exec} substitui a memória e os registradores do processo atual por um novo programa (neste caso, \indexcode{/init}).
+\lstinline{SYS_EXEC} para a função \lstinline{sys_exec}, que o kernel
+invoca. Como vimos no Capítulo~\ref{CH:UNIX}, \indexcode{exec}
+substitui a memória e os registradores do processo atual por um novo
+programa (neste caso, \indexcode{/init}).
 
-Uma vez que o kernel tenha concluído \lstinline{exec},
-ele retorna ao espaço de usuário no processo
-\lstinline{/init}.
+Após o kernel concluir
+\lstinline{exec},
+ele retorna ao espaço do usuário no
+
+processo \lstinline{/init}.
 \lstinline{init}
-\lineref{user/init.c:/^main/}
-cria um novo arquivo de dispositivo de console, se necessário, e então o abre como os descritores de arquivo 0, 1 e 2.
-Depois disso, inicia um shell no console.
-O sistema está no ar.
+cria um novo arquivo de dispositivo de console
+se necessário
+e o abre como descritores de arquivo 0, 1 e 2.
+Em seguida, inicia um shell no console.
+O sistema está ativo.
 
-%%
 \section{Modelo de Segurança}
-%%
+
+Você pode se perguntar como o sistema operacional lida com códigos maliciosos ou com bugs.
+Como lidar com códigos maliciosos é mais difícil do que lidar com bugs acidentais, é razoável
+concentrar-se principalmente em fornecer segurança contra malware.
+Aqui está uma visão geral das premissas e
+objetivos típicos de segurança no design de sistemas operacionais.
+
+O sistema operacional deve assumir que o código em nível de usuário de um processo fará o possível para destruir o kernel ou outros processos. O código do usuário pode tentar desreferenciar ponteiros fora de seu espaço de endereço permitido; pode tentar executar quaisquer instruções RISC-V, mesmo aquelas não destinadas ao código do usuário; pode tentar ler e escrever em qualquer registrador de controle RISC-V; pode tentar acessar diretamente o hardware do dispositivo; e pode passar valores inteligentes para chamadas de sistema na tentativa de enganar o kernel, fazendo-o travar ou fazer algo estúpido. O objetivo do kernel é restringir cada processo do usuário para que tudo o que ele possa fazer seja ler/escrever/executar sua própria memória de usuário, usar os 32 registradores RISC-V de uso geral e afetar o kernel e outros processos da maneira que as chamadas de sistema devem permitir. O kernel deve impedir quaisquer outras ações. Isso normalmente é um requisito absoluto no projeto do kernel.
+
+As expectativas para o código do kernel são bem diferentes. O código do kernel
+é assumido como escrito por programadores bem-intencionados e cuidadosos.
+Espera-se que o código do kernel esteja livre de bugs e certamente não contenha
+nada malicioso. Essa suposição afeta a forma como analisamos o código do kernel.
+Por exemplo, existem muitas funções internas do kernel (por exemplo, os bloqueios de rotação)
+que causariam sérios problemas se o código do kernel as utilizasse
+incorretamente. Ao examinar qualquer trecho específico do código do kernel,
+queremos nos convencer de que ele se comporta corretamente. Assumimos,
+no entanto, que o código do kernel em geral está escrito corretamente e segue
+todas as regras sobre o uso das funções e estruturas de dados do kernel.
+No nível de hardware, presume-se que a CPU, a RAM, o disco, etc. do RISC-V operem conforme anunciado na documentação, sem bugs de hardware.
+
+É claro que na vida real as coisas não são tão simples. É
+difícil impedir que um código de usuário inteligente torne um sistema inutilizável
+(ou o cause em pânico) consumindo recursos protegidos pelo kernel —
+espaço em disco, tempo de CPU, slots na tabela de processos, etc. Geralmente é
+impossível escrever código de kernel livre de bugs ou projetar hardware livre de bugs; se os
+autores de código de usuário malicioso estiverem cientes de bugs no kernel ou no hardware,
+eles os explorarão. Mesmo em kernels maduros e amplamente utilizados, como
+o Linux, as pessoas descobrem novas vulnerabilidades
+continuamente~\cite{mitre:cves}. Vale a pena projetar salvaguardas no
+kernel contra a possibilidade de haver bugs: asserções, verificação de
+tipos, páginas de proteção de pilha, etc. Por fim, a distinção entre
+código do usuário e do kernel às vezes é confusa: alguns processos privilegiados de nível de usuário
+podem fornecer serviços essenciais e efetivamente fazer parte
+do sistema operacional e, em alguns sistemas operacionais, o código privilegiado do usuário
+pode inserir novo código no kernel (como com os módulos carregáveis
+do kernel do Linux).
 
 Você pode se perguntar como o sistema operacional lida com código com bugs ou malicioso. Como lidar com código malicioso é mais difícil do que com bugs acidentais, é razoável focar principalmente em fornecer segurança contra ações maliciosas. Aqui está uma visão geral das suposições e objetivos típicos de segurança no projeto de sistemas operacionais.
 
@@ -482,17 +617,16 @@ Claro que na vida real as coisas não são tão simples. É difícil impedir que
 %% 
 
 A maioria dos sistemas operacionais adotou o conceito de processo, e a maioria
-dos processos se parece com os do xv6. No entanto, sistemas operacionais modernos
-suportam vários threads dentro de um processo, para permitir que um único processo
-aproveite múltiplas CPUs. Suportar múltiplos threads em um
-processo envolve uma quantidade considerável de mecanismos que o xv6 não possui,
-frequentemente incluindo mudanças na interface (por exemplo, o
-\lstinline{clone}
-do Linux, uma variação de
+dos processos se parece com os do xv6. Os sistemas operacionais modernos, no entanto,
+suportam várias threads dentro de um processo, permitindo que um único processo
+explore múltiplas CPUs. Suportar múltiplas threads em um
+processo envolve uma série de mecanismos que o xv6 não possui,
+geralmente incluindo mudanças na interface (por exemplo, o
+\lstinline{clone} do Linux,
+uma variante do
 \lstinline{fork}),
-para controlar quais aspectos
-de um processo os threads compartilham.
-
+para controlar quais aspectos de
+um processo as threads compartilham.
 %% 
 \section{Exercícios}
 %%
@@ -500,7 +634,7 @@ de um processo os threads compartilham.
 \begin{enumerate}
 
 \item Adicione uma chamada de sistema ao xv6
-  que retorne a quantidade de memória livre disponível.
+que retorne a quantidade de memória livre disponível.
 
 % break *0x3ffffff000
 % disas 0x3ffffff000,+8
