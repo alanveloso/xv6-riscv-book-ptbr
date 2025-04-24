@@ -470,6 +470,7 @@ em vez de
 \texttt{0x0:0x80000000}
 contém dispositivos de E/S.
 
+
 As instruções em
 \lstinline{_entry}
 configuram uma pilha para que o xv6 possa executar código C.
@@ -489,6 +490,7 @@ Agora que o kernel tem uma pilha,
 \lstinline{_entry}
 chama o código C em
 \lstinline{start}
+\lineref{kernel/start.c:/^start/}.
 
 A função
 \lstinline{start}
@@ -554,6 +556,7 @@ programa (neste caso, \indexcode{/init}).
 Após o kernel concluir
 \lstinline{exec},
 ele retorna ao espaço do usuário no
+
 processo \lstinline{/init}.
 \lstinline{init}
 cria um novo arquivo de dispositivo de console
@@ -601,6 +604,13 @@ do sistema operacional e, em alguns sistemas operacionais, o código privilegiad
 pode inserir novo código no kernel (como com os módulos carregáveis
 do kernel do Linux).
 
+Você pode se perguntar como o sistema operacional lida com código com bugs ou malicioso. Como lidar com código malicioso é mais difícil do que com bugs acidentais, é razoável focar principalmente em fornecer segurança contra ações maliciosas. Aqui está uma visão geral das suposições e objetivos típicos de segurança no projeto de sistemas operacionais.
+
+O sistema operacional deve assumir que o código de nível de usuário de um processo fará o possível para danificar o kernel ou outros processos. O código de usuário pode tentar desreferenciar ponteiros fora de seu espaço de endereçamento permitido; pode tentar executar qualquer instrução RISC-V, mesmo aquelas não destinadas ao código de usuário; pode tentar ler e escrever em qualquer registrador de controle do RISC-V; pode tentar acessar diretamente o hardware dos dispositivos; e pode passar valores engenhosos para chamadas de sistema tentando enganar o kernel para travar ou fazer algo incorreto. O objetivo do kernel é restringir cada processo de usuário para que ele só possa ler/escrever/executar sua própria memória de usuário, usar os 32 registradores de propósito geral do RISC-V, e afetar o kernel e outros processos apenas nas formas previstas pelas chamadas de sistema. O kernel deve impedir qualquer outra ação. Isso é tipicamente um requisito absoluto no projeto de kernels.
+
+As expectativas para o próprio código do kernel são bastante diferentes. Assume-se que o código do kernel seja escrito por programadores bem-intencionados e cuidadosos. Espera-se que esse código esteja livre de bugs, e certamente que não contenha nada malicioso. Essa suposição afeta como analisamos o código do kernel. Por exemplo, há muitas funções internas do kernel (como os spinlocks) que causariam sérios problemas se usadas incorretamente. Ao examinar qualquer trecho específico de código do kernel, queremos nos convencer de que ele se comporta corretamente. Assumimos, no entanto, que o código do kernel em geral é escrito corretamente e segue todas as regras de uso das funções e estruturas de dados do próprio kernel. Em nível de hardware, assume-se que a CPU RISC-V, RAM, disco, etc. operem conforme descrito na documentação, sem bugs de hardware.
+
+Claro que na vida real as coisas não são tão simples. É difícil impedir que código de usuário engenhoso torne o sistema inutilizável (ou leve a um pânico) ao consumir recursos protegidos pelo kernel — espaço em disco, tempo de CPU, slots na tabela de processos, etc. É geralmente impossível escrever um kernel sem bugs ou projetar hardware sem defeitos; se os autores de código malicioso conhecerem bugs no kernel ou no hardware, irão explorá-los. Mesmo em kernels maduros e amplamente utilizados, como o Linux, vulnerabilidades continuam sendo descobertas regularmente~\cite{mitre:cves}. Vale a pena projetar salvaguardas no kernel contra a possibilidade de ele conter bugs: afirmações (assertions), verificação de tipos, páginas de guarda na pilha, etc. Finalmente, a distinção entre código de usuário e de kernel às vezes é difusa: alguns processos privilegiados em nível de usuário podem fornecer serviços essenciais e funcionar efetivamente como parte do sistema operacional, e em alguns sistemas operacionais o código de usuário privilegiado pode inserir novo código no kernel (como nos módulos carregáveis do kernel no Linux).
 
 %% 
 \section{Mundo real}

@@ -1,104 +1,103 @@
-\chapter{Locking}
+\chapter{Travas}
 \label{CH:LOCK}
 
-Most kernels, including xv6, interleave the execution
-of multiple activities.
-One source of interleaving is multiprocessor hardware:
-computers with
-multiple CPUs executing independently, such as xv6's RISC-V.
-These multiple CPUs share physical RAM,
-and xv6 exploits the sharing to maintain
-data structures that all CPUs read and write.
-This sharing raises the possibility of
-one CPU reading a data structure while another
-CPU is mid-way through updating it, or even
-multiple CPUs updating the same data simultaneously;
-without careful design such parallel access is likely
-to yield incorrect results or a broken data structure.
-Even on a uniprocessor, the kernel may switch the CPU among
-a number of threads, causing their execution to be interleaved.
-Finally, a device interrupt handler that modifies
-the same data as some interruptible code could damage
-the data if the interrupt occurs at just the wrong time.
-The word 
-\indextext{concurrency}
-refers to situations in which
-multiple instruction streams are interleaved,
-due to multiprocessor parallelism,
-thread switching, or interrupts.
+A maioria dos kernels, incluindo o xv6, intercala a execução
+de múltiplas atividades.
+Uma fonte de intercalação é o hardware multiprocessado:
+computadores com
+várias CPUs executando de forma independente, como é o caso do xv6 com RISC-V.
+Essas múltiplas CPUs compartilham a RAM física,
+e o xv6 explora esse compartilhamento para manter
+estruturas de dados que todas as CPUs leem e escrevem.
+Esse compartilhamento levanta a possibilidade de
+uma CPU ler uma estrutura de dados enquanto outra
+CPU está no meio de uma atualização dessa estrutura, ou até mesmo
+múltiplas CPUs atualizando os mesmos dados simultaneamente;
+sem um projeto cuidadoso, esse acesso paralelo provavelmente
+resultará em erros ou em estruturas de dados corrompidas.
+Mesmo em um sistema uniprocessado, o kernel pode alternar a CPU entre
+várias threads, causando a intercalação de suas execuções.
+Finalmente, um manipulador de interrupção de dispositivo que modifica
+os mesmos dados que algum código interrompível pode causar danos
+se a interrupção ocorrer no momento exato.
+A palavra
+\indextext{concorrência}
+refere-se a situações em que
+múltiplos fluxos de instrução são intercalados,
+devido ao paralelismo multiprocessado,
+troca de threads ou interrupções.
 
-Kernels are full of concurrently-accessed data. For example, two CPUs
-could simultaneously call {\tt kalloc}, thereby concurrently
-popping from the head of the free list. Kernel designers like to allow
-for lots of concurrency, since it can yield increased performance
-through parallelism, and increased responsiveness. However, as a result
-kernel designers must convince themselves of
-correctness despite such concurrency. There are many ways to arrive at
-correct code, some easier to reason about than others. Strategies
-aimed at correctness under concurrency, and abstractions that support
-them, are called \indextext{concurrency control} techniques.
+Kernels são repletos de dados acessados concorrentemente. Por exemplo, duas CPUs
+podem chamar simultaneamente {\tt kalloc}, acessando concorrentemente
+o início da lista de memória livre. Projetistas de kernels gostam de permitir
+bastante concorrência, já que isso pode resultar em aumento de desempenho
+através do paralelismo e em maior responsividade. No entanto, como consequência,
+os projetistas precisam se assegurar da
+correção do sistema mesmo diante dessa concorrência. Existem muitas abordagens
+para se chegar a um código correto, algumas mais fáceis de raciocinar do que outras. Estratégias
+voltadas para garantir a correção sob concorrência, e as abstrações que as sustentam,
+são chamadas de técnicas de \indextext{controle de concorrência}.
 
-Xv6 uses a number of concurrency control techniques, depending on the
-situation; many more are possible. This chapter focuses on a widely
-used technique: the \indextext{lock}.  A lock provides mutual
-exclusion, ensuring that only one CPU at a time can hold the lock. If
-the programmer associates a lock with each shared data item, and the
-code always holds the associated lock when using an item, then the
-item will be used by only one CPU at a time.  In this situation, we
-say that the lock protects the data item.  Although locks are an
-easy-to-understand concurrency control mechanism, the downside of
-locks is that they can limit performance, because they serialize
-concurrent operations.
+O xv6 utiliza várias técnicas de controle de concorrência, dependendo da
+situação; muitas outras seriam possíveis. Este capítulo foca em uma técnica amplamente
+utilizada: a \indextext{trava} (lock). Uma trava fornece exclusão mútua,
+garantindo que apenas uma CPU por vez possa possuir a trava. Se
+o programador associar uma trava a cada item de dado compartilhado, e o
+código sempre adquirir a trava associada antes de acessar o item, então o
+item será acessado por apenas uma CPU por vez. Nessa situação, dizemos que
+a trava protege o item de dado. Embora travas sejam um mecanismo de controle
+de concorrência fácil de entender, sua desvantagem é que podem limitar
+o desempenho, pois forçam a serialização de operações concorrentes.
 
-The rest of this chapter explains why xv6 needs locks, how xv6
-implements them, and how it uses them.
+O restante deste capítulo explica por que o xv6 precisa de travas, como o xv6
+as implementa e como as utiliza.
 
+% O seguinte é mais relevante para código sem travas:
+%
+% Uma observação importante é que, ao analisar um trecho de código no
+% xv6, é necessário perguntar-se se algum código concorrente poderia
+% alterar o comportamento pretendido ao modificar dados (ou recursos de hardware)
+% dos quais esse código depende.
+% É preciso ter em mente que o compilador pode transformar uma
+% única instrução em C em várias instruções de máquina,
+% e que essas instruções podem ser executadas de maneira
+% intercalada com instruções executando em outras CPUs.
+% Ou seja, não se pode assumir que as linhas de código C
+% serão executadas de forma atômica.
+% A concorrência torna o raciocínio sobre correção mais difícil.
 
-% The following is most relevant to lock-free code:
-% 
-% A key observation will be that if you look at some code in
-% xv6, you must ask yourself if concurrent code could change
-% the intended behavior of the code by modifying data (or hardware resources)
-% it depends on.
-% You must keep in mind that the compiler may turn a
-% single C statement into several machine instructions,
-% and that those instructions may execute in a way that is
-% interleaved with instructions executing on other CPUs.
-% That is, you cannot assume that lines of C code
-% on the page are executed atomically.
-% Concurrency makes reasoning about correctness difficult.
-
-%% 
-\section{Races}
-%% 
+%%
+\section{Condições de Corrida (Races)}
+%%
 
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.8]{fig/smp.pdf}
-\caption{Simplified SMP architecture}
+\caption{Arquitetura SMP simplificada}
 \label{fig:smp}
 \end{figure}
 
-As an example of why we need locks, consider two processes
-with exited children calling
-{\tt wait} on two different
-CPUs.  {\tt wait} frees the child's memory.
-Thus
-on each CPU, the kernel will call {\tt kfree}
-to free the children's memory pages.  The kernel allocator maintains a linked
-page of memory from a list of free pages, and \lstinline{kfree()}
-For best performance, we might hope that the {\tt kfree}s of the two parent processes
-would execute in parallel without either having to wait for the other,
-but this would not be correct given xv6's {\tt kfree} implementation.
+Como exemplo da necessidade de travas, considere dois processos
+com filhos terminados chamando
+{\tt wait} em dois
+CPUs diferentes. {\tt wait} libera a memória do filho.
+Assim, em cada CPU, o kernel chamará {\tt kfree}
+para liberar as páginas de memória dos filhos. O alocador de memória do kernel mantém uma lista encadeada:
+\lstinline{kalloc()} \lineref{kernel/kalloc.c:/^kalloc/} remove
+uma página de memória do início da lista de páginas livres, e \lstinline{kfree()}
+\lineref{kernel/kalloc.c:/^kfree/} insere uma página de volta na lista.
+Para melhor desempenho, pode-se esperar que os {\tt kfree}s dos dois processos pai
+executem em paralelo, sem que um precise esperar pelo outro,
+mas isso não seria correto dada a implementação de {\tt kfree} no xv6.
 
-Figure~\ref{fig:smp} illustrates the setting in more detail: the
-linked list of free pages is in memory that is shared by the two CPUs, which
-manipulate the list using load and store instructions.  (In
-reality, the processors have caches, but conceptually 
-multiprocessor systems behave as if there were a single, shared memory.)
-If there were no concurrent
-requests, you might implement a list \lstinline{push} operation as
-follows:
+A Figura~\ref{fig:smp} ilustra esse cenário com mais detalhes: a
+lista encadeada de páginas livres está na memória compartilhada pelos dois CPUs, que
+a manipulam usando instruções de leitura e escrita. (Na
+realidade, os processadores têm caches, mas conceitualmente
+sistemas multiprocessados se comportam como se houvesse uma memória única e compartilhada.)
+Se não houvesse requisições concorrentes,
+poderíamos implementar uma operação de inserção (\lstinline{push}) na lista como
+a seguir:
 \begin{lstlisting}[numbers=left,firstnumber=1]
     struct element {
       int data;
@@ -122,57 +121,58 @@ follows:
 \begin{figure}[t]
 \center
 \includegraphics[scale=0.5]{fig/race.pdf}
-\caption{Example race}
+\caption{Exemplo de condição de corrida}
 \label{fig:race}
 \end{figure}
-This implementation is correct if executed in isolation.
-However, the code is not correct if more than one
-copy executes concurrently.
-If two CPUs execute
+
+Essa implementação é correta se executada isoladamente.
+Entretanto, o código não é correto se mais de uma
+instância for executada simultaneamente.
+Se dois CPUs executarem
 \lstinline{push}
-at the same time,
-both might execute line~\ref{line:next} as shown in Fig~\ref{fig:smp},
-before either executes line~\ref{line:list},  which results
-in an incorrect outcome as illustrated by Figure~\ref{fig:race}.
-There would then be two
-list elements with
+ao mesmo tempo,
+ambos podem executar a linha~\ref{line:next} como mostrado na Fig.~\ref{fig:smp},
+antes que qualquer um execute a linha~\ref{line:list}, o que resulta
+em um resultado incorreto, como ilustrado pela Figura~\ref{fig:race}.
+Haveria então dois
+elementos da lista com
 \lstinline{next}
-set to the former value of
+apontando para o valor antigo de
 \lstinline{list}.
-When the two assignments to
+Quando as duas atribuições para
 \lstinline{list}
-happen at line ~\ref{line:list},
-the second one will overwrite the first;
-the element involved in the first assignment
-will be lost.
+ocorrerem na linha~\ref{line:list},
+a segunda sobrescreverá a primeira;
+o elemento envolvido na primeira atribuição
+será perdido.
 
-The lost update at line~\ref{line:list} is an example of a
-\indextext{race}.
-A race is a situation in which a memory location is accessed
-concurrently, and at least one access is a write.
-A race is often a sign of a bug, either a lost update
-(if the accesses are writes) or a read of
-an incompletely-updated data structure.
-The outcome of a race depends on
-the machine code generated by the compiler,
-the timing of the two CPUs involved,
-and how their memory operations are ordered by the memory system,
-which can make race-induced errors difficult to reproduce
-and debug.
-For example, adding print statements while debugging
+A atualização perdida na linha~\ref{line:list} é um exemplo de uma
+\indextext{condição de corrida (race)}.
+Uma race é uma situação na qual uma posição de memória é acessada
+concorrentemente, e pelo menos um dos acessos é uma escrita.
+Uma race é frequentemente um sinal de bug, seja por uma atualização perdida
+(se os acessos forem escritas) ou por uma leitura de
+uma estrutura de dados parcialmente atualizada.
+O resultado de uma race depende do
+código de máquina gerado pelo compilador,
+do tempo de execução dos dois CPUs envolvidos,
+e de como suas operações de memória são ordenadas pelo sistema de memória,
+o que pode tornar erros causados por races difíceis de reproduzir
+e depurar.
+Por exemplo, adicionar comandos de impressão ao depurar
 \lstinline{push}
-might change the timing of the execution enough
-to make the race disappear.
+pode alterar o tempo de execução o suficiente
+para que a race desapareça.
 
-The usual way to avoid races is to use a lock.
-Locks ensure
-\indextext{mutual exclusion},
-so that only one CPU at a time can execute 
-the sensitive lines of
+A forma usual de evitar races é usar uma trava (lock).
+As travas garantem
+\indextext{exclusão mútua},
+de modo que apenas um CPU por vez possa executar 
+as linhas sensíveis de
 \lstinline{push};
-this makes the scenario above impossible.
-The correctly locked version of the above code
-adds just a few lines (highlighted in yellow):
+isso torna o cenário acima impossível.
+A versão corretamente sincronizada do código acima
+adiciona apenas algumas linhas (destacadas em amarelo):
 \begin{lstlisting}[numbers=left,firstnumber=6]
    struct element *list = 0;
    (*@\hl{struct lock listlock;}@*)
@@ -190,107 +190,109 @@ adds just a few lines (highlighted in yellow):
      (*@\hl{release(\&listlock)}; @*)
    }
 \end{lstlisting}
-The sequence of instructions between
+A sequência de instruções entre
 \lstinline{acquire}
-and
+e
 \lstinline{release}
-is often called a
-\indextext{critical section}.
-The lock is typically said to be protecting
+é frequentemente chamada de
+\indextext{seção crítica}.
+Diz-se que a trava está protegendo
 \lstinline{list}.
 
-When we say that a lock protects data, we really mean
-that the lock protects some collection of invariants
-that apply to the data.
-Invariants are properties of data structures that
-are maintained across operations.
-Typically, an operation's correct behavior depends
-on the invariants being true when the operation
-begins.  The operation may temporarily violate
-the invariants but must reestablish them before
-finishing.
-For example, in the linked list case, the invariant is that
+Quando dizemos que uma trava protege dados, queremos dizer
+que ela protege um conjunto de invariantes
+relacionados aos dados.
+Invariantes são propriedades de estruturas de dados que
+são mantidas ao longo das operações.
+Tipicamente, o comportamento correto de uma operação depende
+dos invariantes serem verdadeiros quando a operação
+se inicia. A operação pode violar os invariantes temporariamente,
+mas deve restabelecê-los antes de terminar.
+Por exemplo, no caso da lista encadeada, o invariante é que
 \lstinline{list}
-points at the first element in the list
-and that each element's
+aponta para o primeiro elemento da lista,
+e que o campo
 \lstinline{next}
-field points at the next element.
-The implementation of
+de cada elemento aponta para o próximo.
+A implementação de
 \lstinline{push}
-violates this invariant temporarily: in line~\ref{line:next1},
+viola esse invariante temporariamente: na linha~\ref{line:next1},
 \lstinline{l}
-points
-to the next list element, but
+aponta
+para o próximo elemento da lista, mas
 \lstinline{list}
-does not point at
+ainda não aponta para
 \lstinline{l}
-yet (reestablished at line~\ref{line:list1}).
-The race we examined above
-happened because a second CPU executed
-code that depended on the list invariants
-while they were (temporarily) violated.
-Proper use of a lock ensures that only one CPU at a time
-can operate on the data structure in the critical section, so that
-no CPU will execute a data structure operation when the 
-data structure's invariants do not hold.
+(esse invariante é restabelecido na linha~\ref{line:list1}).
+A condição de corrida examinada acima
+ocorreu porque um segundo CPU executou
+código que dependia dos invariantes da lista
+enquanto eles estavam (temporariamente) violados.
+O uso adequado de uma trava garante que apenas um CPU por vez
+possa operar sobre a estrutura de dados na seção crítica, de modo que
+nenhum CPU executará operações enquanto os invariantes não forem mantidos.
 
-You can think of a lock as
-\indextext{serializing}
-concurrent critical sections so that they run one at a time,
-and thus preserve invariants (assuming the critical sections
-are correct in isolation).
-You can also think of critical sections guarded by the same lock as being
-atomic with respect to each other,
-so that each sees only the complete set of
-changes from earlier critical sections, and never sees
-partially-completed updates.
+Você pode pensar em uma trava como
+\indextext{serializando}
+seções críticas concorrentes para que elas rodem uma de cada vez,
+preservando os invariantes (assumindo que as seções críticas
+estejam corretas isoladamente).
+Também é possível pensar que seções críticas protegidas pela mesma trava são
+atômicas entre si,
+de modo que cada uma vê apenas o conjunto completo de
+alterações feitas por seções críticas anteriores, e nunca vê
+atualizações parcialmente concluídas.
 
-Though useful for correctness, locks inherently
-limit performance.  For example, if two processes call {\tt kfree}
-concurrently, the locks will serialize the two critical sections,
-so that there is no
-benefit from running them on different CPUs.  We say that multiple
-processes \indextext{conflict} if they want the same lock at the same
-time, or that the lock experiences \indextext{contention}.  A major
-challenge in kernel design is avoidance of lock contention
-in pursuit of parallelism.  Xv6 does
-little of that, but sophisticated kernels organize
-data structures and algorithms specifically to avoid lock contention.  In the list
-example, a kernel may maintain a separate free list per CPU and only touch
-another CPU's free list if the current CPU's list is empty and it must steal
-memory from another CPU.  Other use cases may require more
-complicated designs.
+Apesar de úteis para correção, as travas limitam
+o desempenho. Por exemplo, se dois processos chamarem {\tt kfree}
+simultaneamente, as travas irão serializar as duas seções críticas,
+de modo que não há
+benefício em executá-las em diferentes CPUs. Dizemos que múltiplos
+processos \indextext{conflitam} se querem a mesma trava ao mesmo
+tempo, ou que a trava sofre \indextext{contenção}. Um grande
+desafio no projeto de kernels é evitar contenção de travas
+na busca por paralelismo. O xv6
+faz pouco nesse sentido, mas kernels sofisticados organizam
+estruturas de dados e algoritmos especificamente para evitar contenção. No exemplo da lista,
+um kernel pode manter uma lista livre separada por CPU e acessar
+a lista de outro CPU apenas se a lista local estiver vazia e for necessário "roubar"
+memória. Outros casos podem exigir
+projetos mais complexos.
 
-The placement of locks is also important for performance.
-For example, it would be correct to move
+A posição das travas também é importante para o desempenho.
+Por exemplo, seria correto mover
 \lstinline{acquire}
-earlier in
-\lstinline{push},
-before line~\ref{line:malloc}.
-But this would likely reduce performance because then the calls
-to
+para antes da linha~\ref{line:malloc}
+em
+\lstinline{push}.
+Mas isso provavelmente reduziria o desempenho, pois as chamadas
+para
 \lstinline{malloc}
-would be serialized.
-The section ``Using locks'' below provides some guidelines for where to insert
+seriam serializadas.
+A seção ``Usando travas'' abaixo fornece diretrizes sobre onde inserir
+as invocações de
 \lstinline{acquire}
-and
-\lstinline{release}
-invocations.
-%% 
-\section{Code: Locks}
-%% 
-Xv6 has two types of locks: spinlocks and sleep-locks.
-We'll start with spinlocks.
-Xv6 represents a spinlock as a
+e
+\lstinline{release}.
+
+%%
+\section{Código: Travas}
+%%
+
+O xv6 possui dois tipos de travas: travas de espera ocupada (spinlocks) e travas de suspensão (sleep-locks).
+Vamos começar com as travas de espera ocupada.
+O xv6 representa uma spinlock como uma
 \indexcode{struct spinlock}
-The important field in the structure is
+\lineref{kernel/spinlock.h:/struct.spinlock/}.
+O campo importante na estrutura é
 \lstinline{locked},
-a word that is zero when the lock is available
-and non-zero when it is held.
-Logically, xv6 should acquire a lock by executing code like
+uma palavra que vale zero quando a trava está disponível
+e diferente de zero quando está em uso.
+Logicamente, o xv6 deveria adquirir uma trava executando um código como:
+
 \begin{lstlisting}[numbers=left,firstnumber=21]
    void
-   acquire(struct spinlock *lk) // does not work!
+   acquire(struct spinlock *lk) // não funciona!
    {
      for(;;) {
        if(lk->locked == 0) {  (*@\label{line:testlocked}@*)
@@ -300,270 +302,274 @@ Logically, xv6 should acquire a lock by executing code like
      }
    }
 \end{lstlisting}
-Unfortunately, this implementation does not
-guarantee mutual exclusion on a multiprocessor.
-It could happen that two CPUs simultaneously
-reach line~\ref{line:testlocked}, see that 
-\lstinline{lk->locked}
-is zero, and then both grab the lock by executing line~\ref{line:assign}.
-At this point, two different CPUs hold the lock,
-which violates the mutual exclusion property.
-What we need is a way to
-make lines \ref{line:testlocked} and \ref{line:assign} execute as an
-\indextext{atomic}
-(i.e., indivisible) step.
 
-Because locks are widely used,
-multi-core processors usually provide instructions that
-implement an atomic version of
-lines~\ref{line:testlocked} and \ref{line:assign}.
-On the RISC-V this instruction is
+Infelizmente, essa implementação não garante exclusão mútua em um multiprocessador.
+Pode acontecer de dois CPUs simultaneamente
+atingirem a linha~\ref{line:testlocked}, verem que 
+\lstinline{lk->locked}
+é zero, e então ambos adquirem a trava executando a linha~\ref{line:assign}.
+Neste ponto, dois CPUs diferentes possuem a trava,
+o que viola a propriedade de exclusão mútua.
+O que precisamos é de uma maneira de fazer com que as linhas \ref{line:testlocked} e \ref{line:assign}
+sejam executadas como uma etapa
+\indextext{atômica}
+(ou seja, indivisível).
+
+Como as travas são amplamente utilizadas,
+processadores multi-core geralmente fornecem instruções que
+implementam uma versão atômica das linhas~\ref{line:testlocked} e \ref{line:assign}.
+No RISC-V, essa instrução é
 \lstinline{amoswap r, a}.
 \lstinline{amoswap}
-reads the value at the memory address {\tt a},
-writes the contents of register {\tt r} to that address,
-and puts the value it read into {\tt r}.
-That is, it swaps the contents of the register and the memory address.
-It performs this sequence atomically, using special
-hardware to prevent any
-other CPU from using the memory address between the read and the write.
+lê o valor no endereço de memória {\tt a},
+escreve o conteúdo do registrador {\tt r} nesse endereço,
+e coloca o valor lido em {\tt r}.
+Ou seja, ela troca o conteúdo do registrador com o da posição de memória.
+Ela realiza essa sequência de forma atômica, utilizando hardware especial
+para impedir que qualquer outro CPU utilize o mesmo endereço de memória entre a leitura e a escrita.
 
-Xv6's 
+A função
 \indexcode{acquire}
-uses the portable C library call 
+do xv6
+\lineref{kernel/spinlock.c:/^acquire/}
+usa a chamada da biblioteca C portátil
 \lstinline{__sync_lock_test_and_set},
-which boils down to the
-\lstinline{amoswap}
-instruction;
-the return value is the old (swapped) contents of
+que essencialmente se resume à instrução
+\lstinline{amoswap};
+o valor de retorno é o conteúdo antigo (trocado) de
 \lstinline{lk->locked}.
-The
+A função
 \lstinline{acquire}
-function wraps the swap in a loop, retrying (spinning) until it has
-acquired the lock.
-Each iteration swaps one into
-\lstinline{lk->locked} 
-and checks the previous value;
-if the previous value is zero, then we've acquired the
-lock, and the swap will have set 
+envolve a troca em um laço, repetindo (esperando) até que consiga
+adquirir a trava.
+Cada iteração troca o valor um com
 \lstinline{lk->locked}
-to one.
-If the previous value is one, then some other CPU
-holds the lock, and the fact that we atomically swapped one into
+e verifica o valor anterior;
+se o valor anterior era zero, então a trava foi adquirida,
+e a troca terá definido
 \lstinline{lk->locked}
-didn't change its value.
+como um.
+Se o valor anterior era um, então algum outro CPU
+já possui a trava, e o fato de termos trocado atômicamente o valor um
+em
+\lstinline{lk->locked}
+não alterou o valor.
 
-Once the lock is acquired,
+Uma vez que a trava é adquirida,
 \lstinline{acquire}
-records, for debugging, the CPU 
-that acquired the lock.
-The
+registra, para fins de depuração, qual CPU
+adquiriu a trava.
+O campo
 \lstinline{lk->cpu}
-field is protected by the lock
-and must only be changed while holding the lock.
+é protegido pela trava
+e só deve ser modificado enquanto ela estiver adquirida.
 
-The function
+A função
 \indexcode{release}
-is the opposite of 
+\lineref{kernel/spinlock.c:/^release/}
+é o oposto de 
 \lstinline{acquire}:
-it clears the 
+ela limpa o campo
 \lstinline{lk->cpu}
-field
-and then releases the lock.
-Conceptually, the release just requires assigning zero to
+e então libera a trava.
+Conceitualmente, liberar a trava exige apenas atribuir zero a
 \lstinline{lk->locked}.
-The C standard allows compilers to implement an assignment
-with multiple store instructions,
-so a C assignment might be non-atomic with respect
-to concurrent code.
-Instead,
+O padrão da linguagem C permite que compiladores implementem uma atribuição
+com múltiplas instruções de escrita,
+então uma atribuição em C pode não ser atômica com relação a código concorrente.
+Em vez disso,
 \lstinline{release}
-uses the C library function
+usa a função da biblioteca C
 \lstinline{__sync_lock_release}
-that performs an atomic assignment.
-This function also boils down to a RISC-V
+que realiza uma atribuição atômica.
+Essa função também se resume a uma instrução
 \lstinline{amoswap}
-instruction.
+no RISC-V.
+
 %% 
-\section{Code: Using locks}
-%% 
-Xv6 uses locks in many places to avoid races.
-As described above,
+\section{Código: Usando travas}
+%%
+
+O xv6 utiliza travas em muitos lugares para evitar condições de corrida.
+Como descrito acima,
 \lstinline{kalloc}
-and
+\lineref{kernel/kalloc.c:/^kalloc/}
+e
 \lstinline{kfree}
-form a good example.
-Try Exercises 1 and 2 to see what happens if those
-functions omit the locks.
-You'll likely find that it's difficult to trigger incorrect
-behavior, suggesting that it's hard to reliably test whether code
-is free from locking errors and races.
-Xv6 may well have as-yet-undiscovered races.
+\lineref{kernel/kalloc.c:/^kfree/}
+são um bom exemplo.
+Tente os Exercícios 1 e 2 para ver o que acontece se essas
+funções omitirem as travas.
+Você provavelmente descobrirá que é difícil provocar comportamentos incorretos,
+o que sugere que é difícil testar de forma confiável se um código
+está livre de erros de sincronização e condições de corrida.
+É bem possível que o xv6 ainda contenha corridas não descobertas.
 
-A hard part about using locks is deciding how many locks
-to use and which data and invariants each lock should protect.
-There are a few basic principles.
-First, any time a variable can be written by one CPU
-at the same time that another CPU can read or write it,
-a lock should be used to keep the two
-operations from overlapping.
-Second, remember that locks protect invariants:
-if an invariant involves multiple memory locations,
-typically all of them need to be protected
-by a single lock to ensure the invariant is maintained.
+Uma parte difícil ao usar travas é decidir quantas travas
+utilizar e quais dados e invariantes cada trava deve proteger.
+Há alguns princípios básicos.
+Primeiro, sempre que uma variável puder ser escrita por um CPU
+ao mesmo tempo em que outro CPU puder lê-la ou escrevê-la,
+uma trava deve ser usada para evitar que essas
+operações ocorram simultaneamente.
+Segundo, lembre-se de que travas protegem invariantes:
+se um invariante envolve múltiplas localizações de memória,
+tipicamente todas elas devem ser protegidas
+por uma única trava para garantir que o invariante seja mantido.
 
-The rules above say when locks are necessary but say nothing about when locks
-are unnecessary, and it is important for efficiency not to lock too much,
-because locks reduce parallelism.  If parallelism isn't important, then one
-could arrange to have only a single thread and not worry about locks.  A simple
-kernel can do this on a multiprocessor by having a single lock that must be
-acquired on entering the kernel and released on exiting the kernel (though
-blocking system calls such as pipe reads or
+As regras acima dizem quando as travas são necessárias, mas não dizem nada sobre quando elas
+são desnecessárias, e isso é importante para a eficiência: travar em excesso
+reduz o paralelismo. Se o paralelismo não for importante, então seria possível
+simplesmente ter uma única thread e não se preocupar com travas. Um kernel
+simples pode fazer isso em um multiprocessador exigindo que uma única trava
+seja adquirida ao entrar no kernel e liberada ao sair do kernel (embora
+chamadas de sistema bloqueantes como leituras de pipe ou
 \lstinline{wait}
-would pose a problem).  Many uniprocessor operating systems have been converted to
-run on multiprocessors using this approach, sometimes called a ``big
-kernel lock,'' but the approach sacrifices parallelism: only one
-CPU can execute in the kernel at a time.  If the kernel does any heavy
-computation, it would be more efficient to use a larger set of more
-fine-grained locks, so that the kernel could execute on multiple CPUs
-simultaneously.
+possam representar um problema). Muitos sistemas operacionais para uniprocessadores foram adaptados para
+funcionar em multiprocessadores usando essa abordagem, às vezes chamada de
+``grande trava de kernel'' (big kernel lock), mas essa abordagem sacrifica o paralelismo: apenas um
+CPU pode executar no kernel por vez. Se o kernel realizar qualquer computação pesada,
+seria mais eficiente usar um conjunto maior de travas mais específicas (fine-grained),
+para que o kernel possa ser executado em múltiplos CPUs simultaneamente.
 
-As an example of coarse-grained locking, xv6's \lstinline{kalloc.c}
-allocator has a single free list protected by a single lock. If
-multiple processes on different CPUs try to allocate pages at the same
-time, each will have to wait for its turn by spinning in {\tt
-  acquire}. Spinning wastes CPU time, since it's not useful work.
-If contention for the lock wasted a significant fraction of CPU time,
-perhaps performance could be improved by changing the allocator design
-to have multiple free lists, each with its own lock, to allow truly
-parallel allocation.
+Como exemplo de travamento grosseiro (coarse-grained), o alocador do xv6 em \lstinline{kalloc.c}
+possui uma única lista livre protegida por uma única trava. Se
+múltiplos processos em diferentes CPUs tentarem alocar páginas ao mesmo
+tempo, cada um terá que esperar sua vez girando em {\tt
+  acquire}. Esperar (spin) consome tempo de CPU, já que não é trabalho útil.
+Se a contenção pela trava estiver desperdiçando uma fração significativa do tempo de CPU,
+talvez o desempenho possa ser melhorado alterando o projeto do alocador
+para ter múltiplas listas livres, cada uma com sua própria trava, permitindo
+alocação realmente paralela.
 
-As an example of fine-grained locking, xv6 has a separate lock for
-each file, so that processes that manipulate different files can often
-proceed without waiting for each other's locks. The file locking
-scheme could be made even more fine-grained if one wanted to allow
-processes to simultaneously write different areas of the same file.
-Ultimately lock granularity decisions need to be driven by performance
-measurements as well as complexity considerations.
+Como exemplo de travamento refinado (fine-grained), o xv6 possui uma trava separada para
+cada arquivo, de forma que processos que manipulam arquivos diferentes geralmente podem
+prosseguir sem esperar pelas travas uns dos outros. O esquema de travamento de arquivos
+poderia ser ainda mais refinado se quisermos permitir que processos
+escrevam simultaneamente em áreas diferentes do mesmo arquivo.
+Em última análise, as decisões sobre granularidade das travas devem ser guiadas por medições de desempenho
+além de considerações sobre a complexidade do código.
 
-As subsequent chapters explain each part of xv6, they
-will mention examples of xv6's use of locks
-to deal with concurrency.
-As a preview,
-Figure~\ref{fig:locktable}
-lists all of the locks in xv6.
+À medida que os próximos capítulos explicarem cada parte do xv6,
+eles mencionarão exemplos do uso de travas no xv6
+para lidar com concorrência.
+Como prévia,
+a Figura~\ref{fig:locktable}
+lista todas as travas do xv6.
 
 \begin{figure}[t]
 \center
 \begin{tabular}{ll}
-{\bf Lock} & {\bf Description} \\
+{\bf Trava} & {\bf Descrição} \\
 \midrule
-bcache.lock & Protects allocation of block buffer cache entries \\
-cons.lock & Serializes access to console hardware, avoids intermixed output \\
-ftable.lock & Serializes allocation of a struct file in file table \\
-itable.lock & Protects allocation of in-memory inode entries \\
-vdisk\_lock & Serializes access to disk hardware and queue of DMA descriptors \\
-kmem.lock & Serializes allocation of memory \\
-log.lock & Serializes operations on the transaction log \\
-pipe's pi->lock & Serializes operations on each pipe \\
-pid\_lock & Serializes increments of next\_pid \\
-proc's p->lock & Serializes changes to process's state \\
-wait\_lock & Helps wait avoid lost wakeups \\
-tickslock & Serializes operations on the ticks counter \\
-inode's ip->lock & Serializes operations on each inode and its content \\
-buf's b->lock & Serializes operations on each block buffer \\
+bcache.lock & Protege a alocação de entradas no cache de blocos \\
+cons.lock & Serializa o acesso ao hardware do console, evita saída embaralhada \\
+ftable.lock & Serializa a alocação de uma \texttt{struct file} na tabela de arquivos \\
+itable.lock & Protege a alocação de inodes residentes em memória \\
+vdisk\_lock & Serializa o acesso ao hardware de disco e à fila de descritores de DMA \\
+kmem.lock & Serializa a alocação de memória \\
+log.lock & Serializa operações no log de transações \\
+pi->lock do pipe & Serializa operações em cada pipe \\
+pid\_lock & Serializa os incrementos de \texttt{next\_pid} \\
+p->lock do proc & Serializa mudanças no estado de um processo \\
+wait\_lock & Ajuda o \texttt{wait} a evitar perdas de notificações (wakeups) \\
+tickslock & Serializa operações no contador de \texttt{ticks} \\
+ip->lock do inode & Serializa operações em cada inode e seu conteúdo \\
+b->lock do buf & Serializa operações em cada bloco de buffer \\
 \end{tabular}
-\caption{Locks in xv6}
+\caption{Travas no xv6}
 \label{fig:locktable}
 \end{figure}
 
 %% 
-\section{Deadlock and lock ordering}
-%% 
-If a code path through the kernel must hold several locks at the same time, it is
-important that all code paths acquire those locks in the same order.  If
-they don't, there is a risk of \indextext{deadlock}.  Let's say two code paths in
-xv6 need locks A and B, but code path 1 acquires locks in the order A
-then B, and the other path acquires them in the order B then A.
-Suppose thread T1 executes code path 1 and acquires lock A,
-and thread T2 executes code path 2 and acquires lock B.
-Next T1 will try to acquire lock B, and T2 will try to acquire lock A.
-Both acquires will block indefinitely, because in both cases the
-other thread holds the needed lock, and won't release it until
-its acquire returns.
-To avoid such deadlocks, all code paths must acquire
-locks in the same order. The need for a global lock acquisition order
-means that locks are effectively part of each function's specification: 
-callers must invoke functions in a way that causes locks to be acquired
-in the agreed-on order.
+\section{Deadlock e ordenação de travas}
+%%
 
-Xv6 has many lock-order chains of length two involving
-per-process locks
-(the lock in each
-\lstinline{struct proc})
-due to the way that
+Se um caminho de execução no kernel precisar manter várias travas ao mesmo tempo, é
+importante que todos os caminhos adquiram essas travas na mesma ordem. Caso
+contrário, há risco de \indextext{deadlock} (impasse). Suponha que dois caminhos no
+xv6 necessitem das travas A e B, mas o caminho 1 as adquire na ordem A
+depois B, enquanto o outro caminho as adquire na ordem B depois A.
+Imagine que a thread T1 executa o caminho 1 e adquire a trava A,
+e a thread T2 executa o caminho 2 e adquire a trava B.
+Em seguida, T1 tentará adquirir a trava B, e T2 tentará adquirir a trava A.
+Ambas as aquisições irão bloquear indefinidamente, pois em ambos os casos
+a outra thread possui a trava necessária, e não a liberará até que
+sua chamada de aquisição retorne.
+Para evitar tais deadlocks, todos os caminhos devem adquirir
+as travas na mesma ordem. A necessidade de uma ordem global para aquisição
+de travas implica que as travas são efetivamente parte da especificação de cada função:
+quem chama deve invocar as funções de forma que as travas sejam adquiridas
+na ordem previamente acordada.
+
+O xv6 possui muitas cadeias de ordenação de travas de comprimento dois envolvendo
+travas por processo
+(a trava presente em cada
+\lstinline{struct proc}),
+devido à forma como a função
 \lstinline{sleep}
-works (see Chapter~\ref{CH:SCHED}).
-For example,
+funciona (ver Capítulo~\ref{CH:SCHED}).
+Por exemplo,
 \lstinline{consoleintr}
-is the interrupt routine which handles typed characters.
-When a newline arrives, any process that is waiting for
-console input should be woken up.
-To do this,
+\lineref{kernel/console.c:/^consoleintr/}
+é a rotina de interrupção que lida com caracteres digitados.
+Quando uma nova linha chega, qualquer processo que esteja esperando por
+entrada do console deve ser acordado.
+Para isso,
 \lstinline{consoleintr}
-holds
+mantém
 \lstinline{cons.lock}
-while calling 
+enquanto chama 
 \indexcode{wakeup},
-which acquires 
-the waiting process's lock in order to wake it up.
-In consequence, the global deadlock-avoiding
-lock order includes the rule that
+que adquire 
+a trava do processo que está esperando, a fim de acordá-lo.
+Como consequência, a ordem global de travas para evitar deadlocks
+inclui a regra de que
 \lstinline{cons.lock}
-must be acquired before any process lock.
-The file-system code contains xv6's longest lock chains.
-For example, creating a file requires simultaneously
-holding a lock on the directory, a lock on the new file's inode,
-a lock on a disk block buffer, 
-the disk driver's \lstinline{vdisk_lock},
-and
-the calling process's \lstinline{p->lock}.
-To avoid deadlock, file-system code always acquires locks in the order
-mentioned in the previous sentence.
+deve ser adquirida antes de qualquer trava de processo.
+O código do sistema de arquivos contém as maiores cadeias de travas do xv6.
+Por exemplo, criar um arquivo requer manter simultaneamente:
+uma trava no diretório, uma trava no inode do novo arquivo,
+uma trava no buffer de bloco do disco,
+a trava do driver de disco \lstinline{vdisk_lock},
+e
+a trava do processo chamador \lstinline{p->lock}.
+Para evitar deadlocks, o código do sistema de arquivos sempre adquire as travas na ordem
+mencionada na frase anterior.
 
-Honoring a global deadlock-avoiding order can be surprisingly
-difficult. Sometimes the lock order conflicts with logical program
-structure, e.g., perhaps code module M1 calls module M2, but the lock
-order requires that a lock in M2 be acquired before a lock in M1.
-Sometimes the identities of locks aren't known in advance, perhaps
-because one lock must be held in order to discover the identity
-of the lock to be acquired next. This kind of situation arises in the
-file system as it looks up successive components in a path name, and
-in the code for {\tt wait} and {\tt exit} as they search the table of
-processes looking for child processes. Finally, the danger of deadlock
-is often a constraint on how fine-grained one can make a locking
-scheme, since more locks often means more opportunity for deadlock.
-The need to avoid deadlock is often a major factor in kernel
-implementation.
+Seguir uma ordem global de travas para evitar deadlocks pode ser surpreendentemente
+difícil. Às vezes a ordem de travas entra em conflito com a estrutura lógica do
+programa; por exemplo, talvez o módulo de código M1 chame o módulo M2, mas a ordem
+de travas requer que uma trava em M2 seja adquirida antes de uma trava em M1.
+Em outros casos, as identidades das travas não são conhecidas de antemão, talvez
+porque uma trava precise ser mantida para descobrir a identidade
+da próxima trava a ser adquirida. Esse tipo de situação surge no
+sistema de arquivos durante a busca por componentes sucessivos em um nome de caminho, e
+no código de {\tt wait} e {\tt exit}, ao percorrer a tabela de
+processos em busca de processos filhos. Por fim, o perigo de deadlocks
+é frequentemente uma limitação de quão refinado pode ser um esquema de travas,
+já que mais travas frequentemente significa mais oportunidade para deadlocks.
+A necessidade de evitar deadlocks é frequentemente um fator central na
+implementação de kernels.
 
-\section{Re-entrant locks}
+\section{Travas reentrantes}
 
-It might appear that some deadlocks and lock-ordering challenges could
-be avoided by using \indextext{re-entrant locks}, which are also
-called \indextext{recursive locks}.  The idea is that if the lock is held
-by a process and if that process attempts to acquire the lock again,
-then the kernel could just allow this (since the process already has
-the lock), instead of calling panic, as the xv6 kernel does.
+Pode parecer que alguns deadlocks e desafios de ordenação de travas poderiam
+ser evitados usando \indextext{travas reentrantes}, também chamadas de
+\indextext{travas recursivas}. A ideia é que, se uma trava já está sendo mantida
+por um processo, e esse processo tentar adquiri-la novamente,
+então o kernel poderia simplesmente permitir isso (já que o processo já
+possui a trava), em vez de chamar \texttt{panic}, como o kernel do xv6 faz.
 
-It turns out, however, that re-entrant locks make it harder to reason
-about concurrency: re-entrant locks break the intuition that locks
-cause critical sections to be atomic with respect to other critical
-sections.  Consider the following functions \lstinline{f}
-and \lstinline{g}, and a hypothetical function \lstinline{h}:
+No entanto, travas reentrantes tornam mais difícil raciocinar
+sobre concorrência: elas quebram a intuição de que travas
+fazem com que seções críticas sejam atômicas em relação a outras seções críticas.
+Considere as seguintes funções \lstinline{f}
+e \lstinline{g}, e uma função hipotética \lstinline{h}:
 
 \begin{lstlisting}
 struct spinlock lock;
-int data = 0; // protected by lock
+int data = 0; // protegido por lock
 
 f() {
   acquire(&lock);
@@ -576,7 +582,7 @@ f() {
 }
 
 g() {
-  aquire(&lock);
+  acquire(&lock);
   if(data == 0){
     call_once();
     data = 1;
@@ -589,150 +595,152 @@ h() {
 }
 \end{lstlisting}
 
-Looking at this code fragment, the intuition is that
-\lstinline{call_once} will be called
-only once: either by \lstinline{f}, or by \lstinline{g}, but not by
-both.
+Ao observar esse trecho de código, a intuição é que
+\lstinline{call_once} será chamada
+apenas uma vez: ou por \lstinline{f}, ou por \lstinline{g}, mas não por
+ambas.
 
-But if re-entrant locks are allowed, and \lstinline{h} happens to call
-\lstinline{g}, \lstinline{call_once}
-will be called \emph{twice}.
+Porém, se travas reentrantes forem permitidas, e \lstinline{h} acabar chamando
+\lstinline{g}, então \lstinline{call_once}
+será chamada \emph{duas vezes}.
 
-If re-entrant locks aren't allowed, then \lstinline{h} calling
-\lstinline{g} results in a deadlock, which is not great either. But,
-assuming it would be a serious error to call
-\lstinline{call_once}, a deadlock is
-preferable.  The kernel developer will observe the deadlock (the
-kernel panics) and can fix the code to avoid it, while calling
-\lstinline{call_once} twice may
-silently result in an error that is difficult to track down.
+Se travas reentrantes não forem permitidas, então a chamada de
+\lstinline{h} para \lstinline{g}
+resultará em um deadlock, o que também não é ótimo. Mas,
+supondo que chamar \lstinline{call_once}
+duas vezes seja um erro grave, o deadlock
+é preferível. O desenvolvedor do kernel observará o deadlock (o
+kernel irá entrar em pânico) e poderá corrigir o código para evitá-lo, enquanto
+chamar \lstinline{call_once} duas vezes pode
+resultar silenciosamente em um erro difícil de depurar.
 
-For this reason, xv6 uses the simpler to understand non-re-entrant
-locks.  As long as programmers keep the locking rules in mind,
-however, either approach can be made to work. If xv6 were to use
-re-entrant locks, one would have to modify \lstinline{acquire} to
-notice that the lock is currently held by the calling thread. One
-would also have to add a count of nested acquires to struct spinlock,
-in similar style to \lstinline{push_off}, which is discussed next.
+Por esse motivo, o xv6 usa travas não reentrantes, que são mais simples de entender.
+Contudo, desde que os programadores mantenham as regras de travamento em mente,
+ambas as abordagens podem funcionar. Se o xv6 fosse usar
+travas reentrantes, seria necessário modificar \lstinline{acquire} para
+reconhecer que a trava já está sendo mantida pela thread chamadora. Também
+seria necessário adicionar um contador de aquisições aninhadas à \lstinline{struct spinlock},
+em estilo semelhante ao \lstinline{push_off}, que será discutido a seguir.
 
-\section{Locks and interrupt handlers}
+\section{Travas e tratadores de interrupção}
 \label{s:lockinter}
 
-%% 
-Some xv6 spinlocks protect data that is used by
-both threads and interrupt handlers.
-For example, the
+Algumas spinlocks do xv6 protegem dados que são usados tanto por
+threads quanto por tratadores de interrupção.
+Por exemplo, o tratador de interrupção do timer
 \lstinline{clockintr}
-timer interrupt handler might increment
+pode incrementar
 \indexcode{ticks} 
-at about the same time that a kernel
-thread reads
+\lineref{kernel/trap.c:/^clockintr/}
+mais ou menos no mesmo momento em que uma thread do kernel
+lê
 \lstinline{ticks} 
-in
+em
 \indexcode{sys_sleep}
-The lock
+\lineref{kernel/sysproc.c:/ticks0.=.ticks/}.
+A trava
 \indexcode{tickslock}
-serializes the two accesses.
+serializa os dois acessos.
 
-The interaction of spinlocks and interrupts raises a potential danger.
-Suppose
+A interação entre spinlocks e interrupções gera um perigo potencial.
+Suponha que
 \indexcode{sys_sleep}
-holds
+esteja mantendo
 \indexcode{tickslock},
-and its CPU is interrupted by a timer interrupt.
+e sua CPU seja interrompida por uma interrupção de timer.
 \lstinline{clockintr}
-would try to acquire
+tentará adquirir
 \lstinline{tickslock},
-see it was held, and wait for it to be released.
-In this situation,
+verá que ela está mantida e aguardará sua liberação.
+Nessa situação,
 \lstinline{tickslock}
-will never be released: only
+nunca será liberada: apenas
 \lstinline{sys_sleep}
-can release it, but
+pode liberá-la, mas
 \lstinline{sys_sleep}
-will not continue running until
+não continuará sua execução até que
 \lstinline{clockintr}
-returns.
-So the CPU will deadlock, and any code
-that needs either lock will also freeze.
+retorne.
+Portanto, a CPU entrará em deadlock, e qualquer código
+que precise dessa trava também ficará congelado.
 
-To avoid this situation, if a spinlock is used by an interrupt handler,
-a CPU must never hold that lock with interrupts enabled.
-Xv6 is more conservative: when a CPU acquires any
-lock, xv6 always disables interrupts on that CPU.
-Interrupts may still occur on other CPUs, so 
-an interrupt's
-\lstinline{acquire}
-can wait for a thread to release a spinlock; just not on the same CPU.
+Para evitar essa situação, se uma spinlock é usada por um tratador de interrupção,
+uma CPU nunca deve manter essa trava com interrupções habilitadas.
+O xv6 é ainda mais conservador: quando uma CPU adquire qualquer
+trava, o xv6 sempre desabilita as interrupções naquela CPU.
+Interrupções ainda podem ocorrer em outras CPUs, então
+a \lstinline{acquire} de uma interrupção
+pode aguardar uma thread liberar uma spinlock — apenas não na mesma CPU.
 
-Xv6 re-enables interrupts when a CPU holds no spinlocks; it must
-do a little book-keeping to cope with nested critical sections.
+O xv6 reabilita as interrupções quando a CPU não mantém nenhuma spinlock; ele precisa
+fazer um pequeno controle de estado para lidar com seções críticas aninhadas.
 \lstinline{acquire}
-calls
+chama
 \indexcode{push_off}
-and
+\lineref{kernel/spinlock.c:/^push_off/}
+e
 \lstinline{release}
-calls
+chama
 \indexcode{pop_off}
-to track the nesting level of locks on the current CPU.
-When that count reaches zero,
-\lstinline{pop_off} 
-restores the interrupt enable state that existed 
-at the start of the outermost critical section.
-The
+\lineref{kernel/spinlock.c:/^pop_off/}
+para rastrear o nível de aninhamento de travas na CPU atual.
+Quando esse contador chega a zero,
+\lstinline{pop_off}
+restaura o estado de habilitação de interrupção que existia
+no início da seção crítica mais externa.
+As funções
 \lstinline{intr_off}
-and
+e
 \lstinline{intr_on}
-functions execute RISC-V instructions to disable and enable
-interrupts, respectively.
+executam instruções RISC-V para desabilitar e habilitar
+interrupções, respectivamente.
 
-It is important that
+É importante que
 \indexcode{acquire}
-call
+chame
 \lstinline{push_off}
-strictly before setting
+estritamente antes de definir
 \lstinline{lk->locked}
-If the two were reversed, there would be
-a brief window when the lock
-was held with interrupts enabled, and
-an unfortunately timed interrupt would deadlock the system.
-Similarly, it is important that
+\lineref{kernel/spinlock.c:/sync_lock_test_and_set/}.
+Se a ordem fosse invertida, haveria
+uma pequena janela em que a trava
+estaria mantida com interrupções habilitadas, e
+uma interrupção ocorrendo nesse momento causaria um deadlock no sistema.
+De forma similar, é importante que
 \indexcode{release}
-call
+chame
 \indexcode{pop_off}
-only after 
-releasing the lock
+apenas depois de
+liberar a trava
+\lineref{kernel/spinlock.c:/sync_lock_release/}.
 
 %% 
-\section{Instruction and memory ordering}
+\section{Ordenação de instruções e memória}
 %% 
 
-It is natural to think of programs executing in the order
-in which source code statements appear.
-That's a reasonable mental model for single-threaded
-code, but is incorrect when
-multiple threads interact through shared memory~\cite{riscv:user,boehm04}.
-One reason is that compilers emit load and store
-instructions in orders different from those implied
-by the source code, and may entirely omit them
-(for example by caching data in registers).
-Another reason is that the CPU may execute instructions
-out of order to increase performance.
-For
-example, a CPU may notice that in a serial sequence of
-instructions A and B are not dependent on each other.
-The CPU may start instruction B first, either because its
-inputs are ready before A's inputs, or in order to overlap
-execution of A and B.
+É natural pensar que programas executam na ordem
+em que as instruções aparecem no código-fonte.
+Esse é um modelo mental razoável para código de uma única thread,
+mas é incorreto quando
+múltiplas threads interagem por meio de memória compartilhada~\cite{riscv:user,boehm04}.
+Um dos motivos é que compiladores podem emitir instruções de leitura e escrita
+em ordens diferentes das implicadas pelo código-fonte, e podem até mesmo omiti-las
+(por exemplo, ao armazenar dados em registradores).
+Outro motivo é que a CPU pode executar instruções fora de ordem para melhorar o desempenho.
+Por exemplo, uma CPU pode notar que, em uma sequência serial de instruções,
+A e B são independentes entre si.
+A CPU pode iniciar a instrução B primeiro, ou porque suas
+entradas estão prontas antes das de A, ou para sobrepor
+a execução de A e B.
 
-As an example of what could go wrong,
-in this code for
+Como exemplo do que pode dar errado,
+neste código para
 \lstinline{push},
-it would be a disaster if the compiler or CPU moved the
-store corresponding to
-line~\ref{line:next2} to a point after the
+seria um desastre se o compilador ou a CPU movesse a
+escrita correspondente à
+linha~\ref{line:next2} para um ponto após o
 \lstinline{release}
-on line~\ref{line:release}:
+na linha~\ref{line:release}:
 \begin{lstlisting}[numbers=left,firstnumber=1]
       l = malloc(sizeof *l);
       l->data = data;
@@ -741,199 +749,202 @@ on line~\ref{line:release}:
       list = l;      
       release(&listlock);  (*@\label{line:release}@*)
 \end{lstlisting}
-If such a re-ordering occurred, there would be a window during
-which another CPU could acquire the lock and
-observe the updated
-\lstinline{list},
-but see an uninitialized
-\lstinline{list->next}.
+Se tal reordenação ocorresse, haveria uma janela durante a qual outra CPU
+poderia adquirir a trava e
+observar o \lstinline{list} atualizado,
+mas ver um \lstinline{list->next} não inicializado.
 
-The good news is that compilers and CPUs help concurrent programmers
-by following a set of rules called the \indextext{memory model}, and
-by providing some primitives to help programmers control re-ordering.
+A boa notícia é que compiladores e CPUs ajudam programadores concorrentes
+seguindo um conjunto de regras chamado \indextext{modelo de memória}, e
+fornecendo alguns mecanismos para ajudar os programadores a controlar a reordenação.
 
-To tell the hardware and compiler not to re-order,
-xv6 uses
+Para informar ao hardware e ao compilador que não devem reordenar,
+o xv6 utiliza
 \lstinline{__sync_synchronize()} 
-in both
-and
+tanto em
+\lstinline{acquire} \lineref{kernel/spinlock.c:/^acquire/}
+quanto em
+\lstinline{release} \lineref{kernel/spinlock.c:/^release/}.
 \lstinline{__sync_synchronize()}
-is a \indextext{memory barrier}:
-it tells the compiler and CPU to not reorder loads or stores across the
-barrier.
-The barriers in xv6's 
+é uma \indextext{barreira de memória}:
+ela instrui o compilador e a CPU a não reordenar leituras ou escritas através da
+barreira.
+As barreiras em 
 \lstinline{acquire}
-and
+e
 \lstinline{release}
-force order in almost all cases where it matters,
-since xv6 uses locks around accesses to shared data.
-Chapter~\ref{CH:LOCK2} discusses a few exceptions.
+do xv6 impõem a ordem em quase todos os casos em que isso é importante,
+já que o xv6 utiliza travas ao redor de acessos a dados compartilhados.
+O Capítulo~\ref{CH:LOCK2} discute algumas exceções.
 
+Claro! Aqui está a tradução mantendo a estrutura em LaTeX:
+
+```latex
 %% 
-\section{Sleep locks}
+\section{Trancas de sono}
 %% 
 
-% this material refers a lot to sleep, yield, etc, so maybe it should
-% be later, after sleep/wakeup in sched.tex.
-% maybe in lock2.tex
+% este material se refere muito ao sleep, yield, etc., então talvez deva
+% ser mais tarde, após sleep/wakeup em sched.tex.
+% talvez em lock2.tex
 
-Sometimes xv6 needs to hold a lock for a long time. For example, the
-file system (Chapter~\ref{CH:FS}) keeps a file locked while reading
-and writing its content on the disk, and these disk operations can
-take tens of milliseconds. Holding a spinlock that long would lead to
-waste if another process wanted to acquire it, since the acquiring
-process would waste CPU for a long time while spinning. Another
-drawback of spinlocks is that a process cannot yield the CPU while
-retaining a spinlock; we'd like to do this so that other processes can
-use the CPU while the process with the lock waits for the disk.
-Yielding while holding a spinlock is illegal because it might
-lead to deadlock if a second thread then tried to acquire the spinlock;
-since {\tt acquire} doesn't yield the CPU, the second thread's
-spinning might
-prevent the first thread from running and releasing the lock.
-% it's true that timer interrupts might force a switch from the
-% second back to the first thread -- but not if the second
-% already holds one or more locks.
-% it's also true that the danger is most obvious on a uniprocessor,
-% but it can also arise with a longer chain of threads on
-% a multiprocessor.
-Yielding while holding a lock would also violate
-the requirement that interrupts must be off while a spinlock is held.
-Thus we'd like a type of lock that yields the CPU while waiting to
-acquire, and allows yields (and interrupts) while the lock is held.
+Às vezes, o xv6 precisa manter uma tranca por um longo tempo. Por exemplo, o
+sistema de arquivos (Chapter~\ref{CH:FS}) mantém um arquivo trancado enquanto lê
+e escreve seu conteúdo no disco, e essas operações de disco podem
+demorar dezenas de milissegundos. Manter um spinlock por tanto tempo levaria a
+desperdício se outro processo quisesse adquiri-lo, já que o processo que está adquirindo
+desperdiçaria CPU por um longo tempo enquanto gira. Outro
+desvantagem dos spinlocks é que um processo não pode ceder a CPU enquanto
+mantém um spinlock; gostaríamos de fazer isso para que outros processos possam
+usar a CPU enquanto o processo com a tranca espera pelo disco.
+Ceder enquanto mantém um spinlock é ilegal porque pode
+levar a um deadlock se um segundo thread tentar adquirir o spinlock;
+já que {\tt acquire} não cede a CPU, a rotação do segundo thread pode
+impedir que o primeiro thread execute e libere a tranca.
+% é verdade que interrupções de timer podem forçar uma troca do
+% segundo de volta para o primeiro thread -- mas não se o segundo
+% já mantiver uma ou mais trancas.
+% é também verdade que o perigo é mais óbvio em um uniprocessador,
+% mas também pode surgir com uma cadeia mais longa de threads em
+% um multiprocessador.
+Ceder enquanto mantém uma tranca também violaria
+o requisito de que as interrupções devem estar desativadas enquanto um spinlock é mantido.
+Assim, gostaríamos de um tipo de tranca que cede a CPU enquanto espera para
+adquirir, e permite yields (e interrupções) enquanto a tranca é mantida.
 
-Xv6 provides such locks in the form of
+O xv6 fornece tais trancas na forma de
 \indextext{sleep-locks}.
 \lstinline{acquiresleep}
-yields the CPU while waiting,
-using techniques that will be explained in
-Chapter~\ref{CH:SCHED}.
-At a high level, a sleep-lock has a
-\lstinline{locked}
-field that is protected by a spinlock, and 
-\lstinline{acquiresleep} 's
-call to
+\lineref{kernel/sleeplock.c:/^acquiresleep/}
+cede a CPU enquanto espera,
+usando técnicas que serão explicadas em
+Capítulo~\ref{CH:SCHED}.
+Em um nível alto, um sleep-locks tem um
+campo \lstinline{locked}
+que é protegido por um spinlock, e 
+a chamada de \lstinline{acquiresleep}
+para
 \lstinline{sleep}
-atomically yields the CPU and releases the spinlock.
-The result is that other threads can execute while
+cede a CPU de forma atômica e libera o spinlock.
+O resultado é que outros threads podem executar enquanto
 \lstinline{acquiresleep}
-waits.
+espera.
 
-Because sleep-locks leave interrupts enabled, they cannot be
-used in interrupt handlers.
-Because
+Como os sleep-locks mantêm as interrupções habilitadas, elas não podem ser
+usadas em manipuladores de interrupção.
+Como
 \lstinline{acquiresleep}
-may yield the CPU,
-sleep-locks cannot be used inside spinlock critical
-sections (though spinlocks can be used inside sleep-lock
-critical sections).
+pode ceder a CPU,
+as trancas de sono não podem ser usadas dentro de seções críticas de spinlock
+(embora spinlocks possam ser usados dentro de seções críticas de trancas de sono).
 
-Spin-locks are best suited to short critical sections,
-since waiting for them wastes CPU time;
-sleep-locks work well for lengthy operations.
-
-%% 
-\section{Real world}
-%% 
-Programming with locks remains challenging despite years of research
-into concurrency primitives and parallelism.
-It is often best to conceal locks within 
-higher-level constructs like synchronized queues, although xv6 does not
-do this.  If you program with locks, it is wise to use a tool that attempts to
-identify races, because it is easy to miss an invariant that requires
-a lock.
-
-Most operating systems support POSIX threads (Pthreads), which allow a
-user process to have several threads running concurrently on different
-CPUs.  Pthreads has support for user-level locks, barriers, etc.
-Pthreads also allows a programmer to optionally specify that a lock
-should be re-entrant.
-
-Supporting Pthreads at user level requires support from the operating
-system. For example, it should be the case that if one pthread blocks
-in a system call, another pthread of the same process should be able
-to run on that CPU.  As another example, if a pthread changes its
-process's address space (e.g., maps or unmaps memory), the kernel must
-arrange that other CPUs that run threads of the same process update
-their hardware page tables to reflect the change in the address space.
-
-It is possible to implement locks without atomic
-instructions~\cite{lamport:bakery}, but it is expensive, and most
-operating systems use atomic instructions.
-
-Locks can be expensive if many CPUs try to acquire the same lock
-at the same time.  If one CPU has a lock
-cached in its local cache, and another CPU must acquire the lock, then the
-atomic instruction to update the cache line that holds the lock must move the line
-from the one CPU's cache to the other CPU's cache, and perhaps
-invalidate any other copies of the cache line.  Fetching a cache line from
-another CPU's cache can be orders of magnitude more expensive than
-fetching a line from a local cache.
-
-To avoid the expenses associated with locks, many operating systems
-use lock-free data structures and algorithms~\cite{herlihy:art,mckenney:rcuusage}.
-For example, it is possible to implement a linked list like the one in
-the beginning of the chapter that requires no locks during list
-searches, and one atomic instruction to insert an item in a list.
-Lock-free programming is more complicated, however, than programming
-locks; for example, one must worry about instruction and memory
-reordering.  Programming with locks is already hard, so xv6 avoids the
-additional complexity of lock-free programming.
+Spin-locks são mais adequados para seções críticas curtas,
+já que esperar por elas desperdiça tempo de CPU;
+trancas de sono funcionam bem para operações longas.
 
 %% 
-\section{Exercises}
+\section{Mundo real}
+%% 
+
+Programar com trancas continua sendo um desafio, apesar de anos de pesquisa
+sobre primitivas de concorrência e paralelismo.
+É frequentemente melhor ocultar trancas dentro de
+construtos de nível superior, como filas sincronizadas, embora o xv6 não
+faça isso. Se você programar com trancas, é prudente usar uma ferramenta que tente
+identificar condições de corrida, porque é fácil perder uma invariância que requer
+uma tranca.
+
+A maioria dos sistemas operacionais suporta threads POSIX (Pthreads), que permitem que um
+processo de usuário tenha várias threads executando concorrentemente em diferentes
+CPUs. O Pthreads tem suporte para trancas de nível de usuário, barreiras, etc.
+O Pthreads também permite que um programador especifique opcionalmente que uma tranca
+deve ser reentrante.
+
+Suportar Pthreads em nível de usuário requer suporte do sistema
+operacional. Por exemplo, deve ser o caso que, se um pthread bloqueia
+em uma chamada de sistema, outro pthread do mesmo processo deve ser capaz
+de executar naquela CPU. Como outro exemplo, se um pthread altera o
+espaço de endereços de seu processo (por exemplo, mapeia ou desmapeia memória), o kernel deve
+organizar para que outras CPUs que executam threads do mesmo processo atualizem
+suas tabelas de páginas de hardware para refletir a mudança no espaço de endereços.
+
+É possível implementar trancas sem instruções atômicas~\cite{lamport:bakery}, mas isso é caro, e a maioria
+dos sistemas operacionais usa instruções atômicas.
+
+As trancas podem ser caras se muitas CPUs tentarem adquirir a mesma tranca
+ao mesmo tempo. Se uma CPU tem uma tranca
+armazenada em seu cache local, e outra CPU deve adquirir a tranca, então a
+instrução atômica para atualizar a linha de cache que contém a tranca deve mover a linha
+do cache de uma CPU para o cache da outra CPU, e talvez
+invalidar quaisquer outras cópias da linha de cache. Buscar uma linha de cache de
+outro cache de CPU pode ser ordens de magnitude mais caro do que
+buscar uma linha de um cache local.
+
+Para evitar os custos associados às trancas, muitos sistemas operacionais
+usam estruturas de dados e algoritmos livres de trancas~\cite{herlihy:art,mckenney:rcuusage}.
+Por exemplo, é possível implementar uma lista encadeada como a que está no
+início do capítulo que não requer trancas durante as
+buscas na lista, e uma instrução atômica para inserir um item em uma lista.
+Programar de forma livre de trancas é, no entanto, mais complicado do que programar
+com trancas; por exemplo, deve-se se preocupar com a reordenação de instruções e memória.
+Programar com trancas já é difícil, então o xv6 evita a
+complexidade adicional da programação livre de trancas.
+
+%% 
+\section{Exercícios}
 %% 
 
 \begin{enumerate}
   
-\item Comment out the calls to
+\item Comente as chamadas para
 \lstinline{acquire}
-and
+e
 \lstinline{release}
-in
+em
 \lstinline{kalloc}
-This seems like it should cause problems for
-kernel code that calls
+\lineref{kernel/kalloc.c:/^kalloc/}.
+Isso parece que deve causar problemas para
+o código do kernel que chama
 \lstinline{kalloc};
-what symptoms do you expect to see?
-When you run xv6, do you see these symptoms?
-How about when running
+quais sintomas você espera ver?
+Quando você executa o xv6, você vê esses sintomas?
+E ao executar
 \lstinline{usertests}?
-If you don't see a problem, why not?
-See if you can provoke a problem by inserting
-dummy loops into the critical section of
+Se você não vê um problema, por que não?
+Veja se você consegue provocar um problema inserindo
+loops fictícios na seção crítica de
 \lstinline{kalloc}.
 
-\item Suppose that you instead commented out the
-locking in
+\item Suponha que você em vez disso tenha comentado a
+tranca em
 \lstinline{kfree} 
-(after restoring locking in
+(depois de restaurar a tranca em
 \lstinline{kalloc}).
-What might now go wrong? Is lack of locks in
+O que pode dar errado agora? A falta de trancas em
 \lstinline{kfree}
-less harmful than in
+é menos prejudicial do que em
 \lstinline{kalloc}?
 
-\item If two CPUs call
+\item Se duas CPUs chamarem
 \lstinline{kalloc}
-at the same time, one will have to wait for the other,
-which is bad for performance.
-Modify 
+ao mesmo tempo, uma terá que esperar pela outra,
+o que é ruim para o desempenho.
+Modifique 
 \lstinline{kalloc.c}
-to have more parallelism, so that simultaneous
-calls to
+para ter mais paralelismo, de modo que chamadas simultâneas
+para
 \lstinline{kalloc}
-from different CPUs can proceed without waiting for each other.
+de diferentes CPUs possam prosseguir sem esperar uma pela outra.
 
-\item Write a parallel program using POSIX threads, which is supported on most
-operating systems. For example, implement a parallel hash table and measure if
-the number of puts/gets scales with increasing number of CPUs.
+\item Escreva um programa paralelo usando threads POSIX, que é suportado na maioria
+dos sistemas operacionais. Por exemplo, implemente uma tabela hash paralela e meça se
+o número de puts/gets escala com o aumento do número de CPUs.
 
-\item Implement a subset of Pthreads in xv6.  That is, implement a user-level
-thread library so that a user process can have more than 1 thread and arrange
-that these threads can run in parallel on different CPUs.  Come up with a
-design that correctly handles a thread making a blocking system call and
-changing its shared address space.
+\item Implemente um subconjunto de Pthreads no xv6. Ou seja, implemente uma biblioteca de
+threads em nível de usuário para que um processo de usuário possa ter mais de 1 thread e organize
+para que essas threads possam ser executadas em paralelo em diferentes CPUs. Crie um
+design que trate corretamente uma thread fazendo uma chamada de sistema bloqueante e
+mudando seu espaço de endereços compartilhado.
 
 \end{enumerate}
 
